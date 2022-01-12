@@ -87,6 +87,7 @@ message SearchNode {
     int32 due_on_day = 16;
     string tag = 17;
     string note = 18;
+    string fld = 20;
     uint32 introduced_in_days = 19;
   }
 }

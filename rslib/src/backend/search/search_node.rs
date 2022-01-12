@@ -23,6 +23,9 @@ impl TryFrom<pb::SearchNode> for Node {
                 Filter::Tag(s) => {
                     Node::Search(SearchNode::Tag(escape_anki_wildcards_for_search_node(&s)))
                 }
+                Filter::Fld(s) => {
+                    Node::Search(SearchNode::Fld(escape_anki_wildcards_for_search_node(&s)))
+                }
                 Filter::Deck(s) => {
                     Node::Search(SearchNode::Deck(escape_anki_wildcards_for_search_node(&s)))
                 }

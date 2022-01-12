@@ -2,6 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use std::{borrow::Cow, fmt::Write};
+use regex::Regex;
 
 use super::{
     parser::{Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind},
@@ -148,6 +149,7 @@ impl SqlWriter<'_> {
             SearchNode::Rated { days, ease } => self.write_rated(">", -i64::from(*days), ease)?,
 
             SearchNode::Tag(tag) => self.write_tag(&norm(tag)),
+            SearchNode::Fld(fld) => self.write_fld(&norm(fld)),
             SearchNode::State(state) => self.write_state(state)?,
             SearchNode::Flag(flag) => {
                 write!(self.sql, "(c.flags & 7) == {}", flag).unwrap();
@@ -207,6 +209,30 @@ impl SqlWriter<'_> {
                     self.args.push(format!("(?i).* {}(::| ).*", re));
                 }
             }
+        }
+    }
+
+    fn write_fld(&mut self, text: &str) {
+        let re = Regex::new("^\\^|([.?|*])|\\$$").unwrap();
+        if text.len() > 1 && re.is_match(text) {
+            match text {
+                "*" => {
+                    write!(self.sql, "true").unwrap();
+                }
+                text => {
+                    write!(self.sql, "n.sfld regexp ?").unwrap();
+                    self.args.push(text.to_string());
+                }
+            }
+        } else {
+            let text = format!("%{}%", &to_sql(text));
+            self.args.push(text);
+            write!(
+                self.sql,
+                "(n.sfld like ?{n} escape '\\')",
+                n = self.args.len(),
+            )
+            .unwrap();
         }
     }
 
@@ -592,6 +618,7 @@ impl SearchNode {
             SearchNode::UnqualifiedText(_) => RequiredTable::Notes,
             SearchNode::SingleField { .. } => RequiredTable::Notes,
             SearchNode::Tag(_) => RequiredTable::Notes,
+            SearchNode::Fld(_) => RequiredTable::Notes,
             SearchNode::Duplicates { .. } => RequiredTable::Notes,
             SearchNode::Regex(_) => RequiredTable::Notes,
             SearchNode::NoCombining(_) => RequiredTable::Notes,

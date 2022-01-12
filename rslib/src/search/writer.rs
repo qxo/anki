@@ -97,6 +97,7 @@ fn write_search_node(node: &SearchNode) -> String {
         Notetype(s) => maybe_quote(&format!("note:{}", s)),
         Rated { days, ease } => write_rated(days, ease),
         Tag(s) => maybe_quote(&format!("tag:{}", s)),
+        Fld(s) => maybe_quote(&format!("fld:{}", s)),
         Duplicates { notetype_id, text } => write_dupe(notetype_id, text),
         State(k) => write_state(k),
         Flag(u) => format!("flag:{}", u),
