@@ -33,6 +33,7 @@ jobs:
     - name: Install bazelisk
       run: |
         dir env:
+        winget install --id Git.Git -e --source winget
         #curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.1.0/bazelisk-linux-amd64"
         curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
         mkdir "${GITHUB_WORKSPACE}/bin/"
@@ -42,9 +43,9 @@ jobs:
 
     - name: Test
       run: |
-        rm bazel.bat
+        #rm bazel.bat
         $env:Path +=";${GITHUB_WORKSPACE}\bin"
-        .\bin\bazel.exe -k -c opt dist --color=yes
+        bazel.exe build -k -c opt dist --color=yes
 #        \bin\bazel.exe test ...
 
   #  - name: Build
