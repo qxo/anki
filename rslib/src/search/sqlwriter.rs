@@ -212,7 +212,40 @@ impl SqlWriter<'_> {
         }
     }
 
+    fn write_sql_in(&mut self, key: &str, input: String) {
+        let split_re = Regex::new("[,|;]+").unwrap();
+        let list: Vec<_> = split_re.split(&input).into_iter().collect();
+        let s1: String =itertools::Itertools::intersperse(list.iter().map(|_x| "?"), &", ").collect::<String>();
+        write!(self.sql, " n.sfld {} ( {} ) ",key, s1).unwrap();
+        for x in list {
+            self.args.push(x.to_string());
+        }
+    }
+   
     fn write_fld(&mut self, text: &str) {
+        let prefix_re = Regex::new("^(in|re|ex|not):").unwrap();
+        let prefix = prefix_re.captures(text);
+        if !prefix.is_none(){
+            let prefix1 = prefix.unwrap();
+            let prefix_key: &str = &prefix1[1];
+            let prefix_len = &prefix1[0].len();
+            let input : String  =  text.chars().skip(*prefix_len).collect();
+
+            match prefix_key {
+                "not" | "ex" => {
+                    self.write_sql_in("not in", input);
+                },
+                "re" => {
+                    write!(self.sql, "n.sfld regexp ?").unwrap();
+                    let re = &to_custom_re(&input, r"\S");
+                    self.args.push(format!("(?i).*{}.*", re));
+                },
+                "in" | _ => {
+                    self.write_sql_in("in", input);
+                }
+            }
+            return;
+        }
         let re = Regex::new("^\\^|([.?|*])|\\$$").unwrap();
         if text.len() > 1 && re.is_match(text) {
             match text {
@@ -231,8 +264,7 @@ impl SqlWriter<'_> {
                 self.sql,
                 "(n.sfld like ?{n} escape '\\')",
                 n = self.args.len(),
-            )
-            .unwrap();
+            ).unwrap();
         }
     }
 
@@ -776,6 +808,8 @@ mod test {
         );
         assert_eq!(s(ctx, "tag:none"), ("(n.tags = '')".into(), vec![]));
         assert_eq!(s(ctx, "tag:*"), ("(true)".into(), vec![]));
+
+        assert_eq!(s(ctx, "fld:*"), ("(true)".into(), vec![]));
 
         // state
         assert_eq!(
