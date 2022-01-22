@@ -43,7 +43,9 @@ jobs:
     - name: Test
       run: |
         rm bazel.bat
-        \bin\bazel.exe test ...
+        $env:Path +=";${GITHUB_WORKSPACE}\bin"
+        .\bin\bazel.exe -k -c opt dist --color=yes
+#        \bin\bazel.exe test ...
 
   #  - name: Build
   #    run: |
