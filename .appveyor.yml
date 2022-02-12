@@ -1,65 +1,28 @@
-image:
-#  - Ubuntu1804
-#  - Ubuntu2004
-  - Visual Studio 2017
-  - Visual Studio 2019
-
 environment:
-  USE_BAZEL_VERSION: 5.0.0
-  BAZELISK_VERSION: 1.11.0
+  APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2019
+  # Qt is not available compiled with Visual Studio 2019 but it is binary compatible
+#  QT_VERSION: 5.9.9\msvc2017_64
+  VCVARSALLPATH: C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat
   VCVARSALL: x64
-  platform: "x64"
+#  nodejs_version: "12.1.0"
+#  npm_version: "6.14.4"
+#  GYP_MSVS_VERSION: 2019
+#  platform: "x64"
 
-for:
-#-
-#  matrix:
-#    only:
-#      - image: Ubuntu1804
-#      - image: Ubuntu2004
-#  environment:
-#    BAZELISK_BINARY: bazelisk-linux-amd64
-#    BAZEL_BINARY: bazel
--
-  matrix:
-    only:
-      - image: Visual Studio 2017
-  environment:
-    VCVARSALLPATH: C:\"Program Files (x86)\Microsoft Visual Studio"\2017\Community\VC\Auxiliary\Build\vcvarsall.bat
-    GYP_MSVS_VERSION: 2017
-    BAZELISK_BINARY: bazelisk-windows-amd64.exe
-    BAZEL_BINARY: bazel.exe
--
-  matrix:
-    only:
-      - image: Visual Studio 2019
-  environment:
-    VCVARSALLPATH: C:\"Program Files (x86)\Microsoft Visual Studio"\2019\Community\VC\Auxiliary\Build\vcvarsall.bat
-    GYP_MSVS_VERSION: 2019
-    BAZELISK_BINARY: bazelisk-windows-amd64.exe
-    BAZEL_BINARY: bazel.exe
+#init:
+#  - cinst python3
+#  - call "%VCVARSALLPATH%" %VCVARSALL%
+#  - set PATH=C:\Qt\%QT_VERSION%\bin;C:\Qt\Tools\QtCreator\bin;%PATH%;
 
-init:
-  - cmd: call %VCVARSALLPATH% %VCVARSALL%
-
-install:
-  # Create a bin folder where bazelisk will be located and add it in the path
-  - ps: New-Item -Type dir "$env:HOME\bin"
-  - ps: |
-      if ($isLinux) {
-        $env:PATH += ":$env:HOME/bin"
-      } else {
-        $Env:Path += ";$env:HOME/bin"
-      }
-      echo $env:BAZELISK_VERSION
-  # Download bazelisk from github
-  - ps: Invoke-Webrequest "https://github.com/bazelbuild/bazelisk/releases/download/v$env:BAZELISK_VERSION/$env:BAZELISK_BINARY" -OutFile "$env:BAZELISK_BINARY"
-  # Renaming bazelisk to bazel is quite a common practice, people got used to run bazel build and not bazelisk build
-  - ps: Copy-Item -Path "$env:BAZELISK_BINARY" -Destination "$env:HOME\bin\$env:BAZEL_BINARY" -Recurse
-  - sh: chmod +x $HOME/bin/bazel
+#install:
+#  - cmd: appveyor-retry powershell Install-Product node $env:nodejs_version x64
 
 build_script:
-#  - cmd: pwsh .\script.ps1
-  - cmd: |
-       bazel run %BUILDARGS% //qt:runanki -k --verbose_failures
- #     bazel.exe build -k -c opt dist --color=yes
- # - sh: pwsh -File script.ps1
+#  - npx @bazel/bazelisk version
+  - echo %PATH%
+  - mkdir C:\bazel
+  - set PATH=%PATH:\\=\%;C:\bazel
+  - curl -Lo /bazel/bazel.exe "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
+  - .\tools\build.bat  --verbose_failures
+#  - bazel build -c opt wheels --color=yes --verbose_failure
+#  - npx @bazel/bazelisk  build -c opt wheels --color=yes --verbose_failure
