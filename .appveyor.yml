@@ -9,6 +9,8 @@ environment:
 #  GYP_MSVS_VERSION: 2019
 #  platform: "x64"
 
+init:
+  - ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 #init:
 #  - cinst python3
 #  - call "%VCVARSALLPATH%" %VCVARSALL%
@@ -26,3 +28,6 @@ build_script:
   - .\tools\build.bat  --verbose_failures
 #  - bazel build -c opt wheels --color=yes --verbose_failure
 #  - npx @bazel/bazelisk  build -c opt wheels --color=yes --verbose_failure
+
+on_finish:
+  - ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
