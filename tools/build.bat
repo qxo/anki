@@ -7,7 +7,7 @@ echo --- Build wheels
 set cwd=%CD%
 set dist=.bazel\out\dist
 
-bazel build -c opt wheels --color=yes || exit /b 1
+bazel build -c opt wheels --color=yes %* || exit /b 1
 if exist %dist% (
     rd /s /q %dist% || exit /b 1
 )
