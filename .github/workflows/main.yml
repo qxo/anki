@@ -53,9 +53,9 @@ jobs:
           "C:\users\runneradmin\_bazel_runneradmin"
         key: bazel
 
-    - uses: GuillaumeFalourd/setup-windows10-sdk-action@v1
-      with:
-        sdk-version: 19041
+#    - uses: GuillaumeFalourd/setup-windows10-sdk-action@v1
+#      with:
+#        sdk-version: 19041
 
 #   - uses: ilammy/msvc-dev-cmd@v1
     - name: Install bazelisk
@@ -69,12 +69,15 @@ jobs:
         #chmod +x "${GITHUB_WORKSPACE}/bin/bazel"
         dir "${GITHUB_WORKSPACE}"
     - name: Test
+      shell: cmd
       run: |
-        $env:Path +=";${GITHUB_WORKSPACE}\bin"
-        $Env:PATH = "$Env:PATH;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
-        which bash
-        bash -c "test -f C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js && sed -i 's#return str.lastIndexOf#return str&&str.lastIndexOf#g' C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js"
-        bazel.exe build -k -c opt dist --color=yes
+        set PATH=%PATH:\\=\%
+        set PATH ="%GITHUB_WORKSPACE%\bin;%PATH%;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
+        .\tools\build.bat --verbose_failures
+#         $Env:PATH = "$Env:PATH;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
+#        which bash
+#        bash -c "test -f C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js && sed -i 's#return str.lastIndexOf#return str&&str.lastIndexOf#g' C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js"
+#        bazel.exe build -k -c opt dist --color=yes
 #        "${GITHUB_WORKSPACE}\bin\bazel.exe test //..."
 #        $env:BAZEL_VC_FULL_VERSION="14.16.27023"
 #        $env:BAZEL_VC="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build"
