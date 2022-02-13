@@ -1,0 +1,83 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ main ] #, dev-github-action 
+  pull_request:
+    branches: [ main ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+     inputs:
+          logLevel:
+            description: 'Log level'
+            required: true
+            default: 'info'
+jobs:
+  build:
+    #runs-on: ubuntu-latest
+    runs-on: windows-2019
+    steps:
+    - uses: actions/checkout@v2
+    - name: init1
+      run: |
+        #mkdir customgit
+        #cd "C:\Program Files\Microsoft Visual Studio\" 
+        cd "C:\Program Files\Git"
+        pwd
+        dir
+#        cmd.exe /c "dir link.exe /s"
+
+#    - uses: actions/checkout@v2
+#      with:
+#        # Repository name with owner. For example, actions/checkout
+#        #   Default: ${{ github.repository }}
+#        repository: 'qxo/xtools-ci'
+#        # The branch, tag or SHA to checkout. When checking out the repository that
+#       # triggered a workflow, this defaults to the reference or SHA for that event.
+#        # Otherwise, uses the default branch.
+#        ref: 'win64'
+#        path: 'customgit'
+    - name: test1
+      run: |
+        dir
+    - name: Mount bazel cache
+      uses: actions/cache@v2
+      with:
+        path: |
+          "C:\Users\runneradmin\.cache\bazel"
+          "C:\users\runneradmin\_bazel_runneradmin"
+        key: bazel
+
+    - uses: GuillaumeFalourd/setup-windows10-sdk-action@v1
+      with:
+        sdk-version: 19041
+
+#   - uses: ilammy/msvc-dev-cmd@v1
+    - name: Install bazelisk
+      run: |
+        echo $env:USERPROFILE
+        curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
+        mkdir "${GITHUB_WORKSPACE}\bin"
+        #mv bazelisk-linux-amd64 "${GITHUB_WORKSPACE}/bin/bazel"
+        dir
+        mv bazelisk-windows-amd64.exe "${GITHUB_WORKSPACE}\bin\bazel.exe"
+        #chmod +x "${GITHUB_WORKSPACE}/bin/bazel"
+        dir "${GITHUB_WORKSPACE}"
+    - name: Test
+      run: |
+        $env:Path +=";${GITHUB_WORKSPACE}\bin"
+        $Env:PATH = "$Env:PATH;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
+        which bash
+        bash -c "test -f C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js && sed -i 's#return str.lastIndexOf#return str&&str.lastIndexOf#g' C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js"
+        bazel.exe build -k -c opt dist --color=yes
+#        "${GITHUB_WORKSPACE}\bin\bazel.exe test //..."
+#        $env:BAZEL_VC_FULL_VERSION="14.16.27023"
+#        $env:BAZEL_VC="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build"
+  #  - name: Build
+  #    run: |
+  #      "${GITHUB_WORKSPACE}/bin/bazel" build //...
