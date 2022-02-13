@@ -23,9 +23,16 @@ build_script:
 #  - npx @bazel/bazelisk version
   - echo %PATH%
   - mkdir C:\bazel
+  - mkdir C:\tmp
+  - set TMP=C:\tmp
+  - set TEMP=C:\tmp
   - set PATH=%PATH:\\=\%;C:\bazel
+  - call "%VCVARSALLPATH%" %VCVARSALL%
+#    git worktree add C:\anki
+#    cd C:\anki
   - curl -Lo /bazel/bazel.exe "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
-  - .\tools\build.bat  --verbose_failures
+  - bazel.exe --output_user_root=\bazel\ankici --output_base=\bazel\ankici\base test --config=ci ...
+ # - .\tools\build.bat --verbose_failures
 #  - bazel build -c opt wheels --color=yes --verbose_failure
 #  - npx @bazel/bazelisk  build -c opt wheels --color=yes --verbose_failure
 

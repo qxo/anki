@@ -23,13 +23,13 @@ jobs:
     runs-on: windows-2019
     steps:
     - uses: actions/checkout@v2
-    - name: init1
-      run: |
-        #mkdir customgit
-        #cd "C:\Program Files\Microsoft Visual Studio\" 
-        cd "C:\Program Files\Git"
-        pwd
-        dir
+#    - name: init1
+#      run: |
+#        #mkdir customgit
+#        #cd "C:\Program Files\Microsoft Visual Studio\" 
+#        cd "C:\Program Files\Git"
+#        pwd
+#        dir
 #        cmd.exe /c "dir link.exe /s"
 
 #    - uses: actions/checkout@v2
@@ -58,22 +58,30 @@ jobs:
 #        sdk-version: 19041
 
 #   - uses: ilammy/msvc-dev-cmd@v1
-    - name: Install bazelisk
-      run: |
-        echo $env:USERPROFILE
-        curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
-        mkdir "${GITHUB_WORKSPACE}\bin"
-        #mv bazelisk-linux-amd64 "${GITHUB_WORKSPACE}/bin/bazel"
-        dir
-        mv bazelisk-windows-amd64.exe "${GITHUB_WORKSPACE}\bin\bazel.exe"
-        #chmod +x "${GITHUB_WORKSPACE}/bin/bazel"
-        dir "${GITHUB_WORKSPACE}"
-    - name: Test
+#    - name: Install bazelisk
+#      run: |
+#        echo $env:USERPROFILE
+#        curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/bazelisk-windows-amd64.exe"
+#        mkdir "${GITHUB_WORKSPACE}\bin"
+#        #mv bazelisk-linux-amd64 "${GITHUB_WORKSPACE}/bin/bazel"
+#        dir
+#        mv bazelisk-windows-amd64.exe "${GITHUB_WORKSPACE}\bin\bazel.exe"
+#        #chmod +x "${GITHUB_WORKSPACE}/bin/bazel"
+#        dir "${GITHUB_WORKSPACE}"
+    - name: build
       shell: cmd
       run: |
         set PATH=%PATH:\\=\%
-        set PATH ="%GITHUB_WORKSPACE%\bin;%PATH%;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
+        set PATH=%PATH%;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin
+        mkdir C:\tmp
+        set TMP=C:\tmp
+        set TEMP=C:\tmp
+        git worktree add C:\anki
+        C:
+        cd C:\anki
+        bazel.exe --output_user_root=\bazel\ankici --output_base=\bazel\ankici\base test --config=ci ...
         .\tools\build.bat --verbose_failures
+#%GITHUB_WORKSPACE%\bin;
 #         $Env:PATH = "$Env:PATH;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin"
 #        which bash
 #        bash -c "test -f C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js && sed -i 's#return str.lastIndexOf#return str&&str.lastIndexOf#g' C:/users/runneradmin/_bazel_runneradmin/lxuyldak/execroot/ankidesktop/node_modules/typescript/lib/tsc.js"
