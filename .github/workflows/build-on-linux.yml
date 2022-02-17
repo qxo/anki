@@ -1,4 +1,7 @@
 # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions
+# https://docs.github.com/en/actions/learn-github-actions/expressions#operators
+# https://github.com/actions/virtual-environments
+
 name: build-on-linux
 
 concurrency: 
@@ -8,68 +11,72 @@ concurrency:
 # Controls when the workflow will run
 on:
   # Triggers the workflow on push or pull request events but only for the main branch
-#  push:
-#    branches: [ ]
+  push:
+    branches: [ tmp4linux ] #tmp4linux for trigger this workflow only
 #    paths:
-#    - .github/workflows/build-on-ubuntu.yml
+#    - .github/workflows/build-on-l.yml
 #  pull_request:
 #    branches: [ main ]
   workflow_call:
-     inputs:
-        buildArgs:
-          description: 'buildArgs ie: --test_verbose_timeout_warnings'
-          required: false
-          type: string
+    inputs:
+      buildArgs:
+        description: 'buildArgs ie: --test_verbose_timeout_warnings'
+        required: false
+        type: string
+      cacheOn:
+        description: 'enable cache'
+        required: false
+        default: 'true'
+        type: string
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-     inputs:
-          buildArgs:
-            description: 'buildArgs ie: --test_verbose_timeout_warnings'
-            required: false
-            default: ''
+    inputs:
+      buildArgs:
+        description: 'buildArgs ie: --test_verbose_timeout_warnings'
+        required: false
+        default: '--verbose_failures'
+      cacheOn:
+        description: 'cacheOn: change to false for disable.'
+        required: false
+        default: 'true'
 
-# https://github.com/actions/virtual-environments
 jobs:
   build:
-#    runs-on: ubuntu-20.04
     runs-on: ubuntu-latest
-#    runs-on: ubuntu-18.04
-#    runs-on: windows-latest
-#    runs-on: macos-latest
-#    runs-on: macos-10.15
     steps:
     - name: cancel previous runs
       uses: styfle/cancel-workflow-action@0.8.0
       with:
         access_token: ${{ github.token }}
     - uses: actions/checkout@v2
-    - name: build
- #     shell: sh
-      env:
-        RUST_BACKTRACE: 1
+    - name: Cache multiple paths
+      uses: actions/cache@v2
+      if: ${{ github.event.inputs.cacheOn != 'false'}}
+      with:
+       path: |
+         ~/state/bazel/disk
+         ~/state/bazel/repo
+         ~/state/node_modules
+         ~/state/bin
+#        !~/cache/exclude
+       key: ${{ runner.os }}
+    - uses: awalsh128/cache-apt-pkgs-action@v1
+      id: catche-apt
+      if: false
+      with:
+        packages: libegl1 libfontconfig1 libgl1 libgstreamer-gl1.0-0 libgstreamer1.0-0 libnss3 libpulse-mainloop-glib0 libssl-dev libxcomposite1 libxcursor1 libxi6 libxkbcommon-x11-0 libxkbcommon0 libxkbfile1 libxrandr2 libxrender1 libxtst6 portaudio19-dev python3-dev autopoint debhelper dh-autoreconf dh-strip-nondeterminism dwz gettext  gir1.2-gst-plugins-base-1.0 gir1.2-gstreamer-1.0 gstreamer1.0-gl gstreamer1.0-plugins-base intltool-debian libarchive-cpio-perl libarchive-zip-perl libasound2-dev libasyncns0 libcdparanoia0 libcroco3 libdebhelper-perl libegl-dev libegl-mesa0 libegl1-mesa-dev libfile-stripnondeterminism-perl libflac8 libgl-dev libgl1-mesa-dev libgles-dev libgles1 libgles2 libgles2-mesa-dev libglvnd-dev libglx-dev libgraphene-1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libjack-dev libjack0 libmail-sendmail-perl libopengl-dev libopengl0 libopus0 liborc-0.4-0 liborc-0.4-dev liborc-0.4-dev-bin libportaudio2 libportaudiocpp0 libpulse0 libsndfile1 libsub-override-perl libsys-hostname-long-perl libtheora0 libvisual-0.4-0 libvorbisenc2 libx11-xcb-dev libxcb-xkb1 po-debconf
+#        version: 1.0
+    - name: install apt packages
+      if: true #steps.catche-apt.outputs.cache-hit != 'true'
       run: |
          sudo apt-get update \
             && sudo apt-get install --yes\
-            autoconf \
-            bash \
-            ca-certificates \
-            curl \
-            findutils \
-            g++ \
-            gcc \
-            git \
-            grep \
-            libdbus-1-3 \
             libegl1 \
-            libfontconfig1 \
             libgl1 \
             libgstreamer-gl1.0-0 \
             libgstreamer-plugins-base1.0 \
             libgstreamer1.0-0 \
-            libnss3 \
             libpulse-mainloop-glib0 \
-            libpulse-mainloop-glib0 \
-            libssl-dev \
             libxcomposite1 \
             libxcursor1 \
             libxi6 \
@@ -79,17 +86,29 @@ jobs:
             libxrandr2 \
             libxrender1 \
             libxtst6 \
-            make \
             pkg-config \
+            libfontconfig1 \
+            libssl-dev \
+            libnss3 \
             portaudio19-dev \
-            python3-dev \
-            rsync \
-            zstd
-            python --version
-            python3 --version
-            sudo mkdir -p /state/bazel
-            sudo chown -R $USER /state
-            export BAZEL_VERSION=5.0.0
-            sudo curl -fLo /usr/bin/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
-            sudo chmod +x /usr/bin/bazel
-            ./.buildkite/linux/entrypoint ${{ github.event.inputs.buildArgs }}
+            python3-dev
+
+    - name: install bazel
+      run: |
+        export BAZEL_VERSION=5.0.0
+        if [ ! -f ~/state/bin/bazel ] ; then
+           mkdir -p  ~/state/bin
+           curl -fLo ~/state/bin/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
+           chmod +x ~/state/bin/bazel
+        fi
+    - name: build
+ #     shell: sh
+      env:
+        RUST_BACKTRACE: 1
+      run: |
+        export PATH=~/state/bin:$PATH
+        export STATE=~/state
+        ./.buildkite/linux/entrypoint ${{ github.event.inputs.buildArgs }}
+
+
+# https://docs.github.com/en/actions/learn-github-actions/expressions#operators
