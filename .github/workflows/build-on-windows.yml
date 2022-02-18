@@ -32,7 +32,8 @@ jobs:
     steps:
 
     - uses: actions/checkout@v2
-#    - uses: Vampire/setup-wsl@v1
+    # fix Windows Subsystem for Linux has no installed distributions.
+    - uses: Vampire/setup-wsl@v1
     - name: build
       shell: cmd
       env:
