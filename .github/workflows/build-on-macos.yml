@@ -8,10 +8,10 @@ concurrency:
 # Controls when the workflow will run
 on:
   # Triggers the workflow on push or pull request events but only for the main branch
-#  push:
+  push:
 #    paths:
 #    - .github/workflows/build-on-macos.yml
-#    branches: [ hztest ]
+    branches: [ tmp4macos, '!tmp4build', '!tmp4build1' ]
 #  pull_request:
 #    branches: [ main ]
   workflow_call:
@@ -33,11 +33,11 @@ jobs:
   build:
     runs-on: macos-latest
 #    runs-on: ${{ matrix.os }}
-#    defaults:
-#      run:
+    defaults:
+      run:
         # Use a login shell, so that ~/.bash_profile is executed and
         # the conda environment gets initialised.
-#        shell: bash -l {0}
+        shell: bash -l {0}
     strategy:
       fail-fast: true
  #     matrix:
@@ -49,13 +49,19 @@ jobs:
       with:
         access_token: ${{ github.token }}
     - uses: actions/checkout@v2
-#    - uses: maxim-lobanov/setup-xcode@v1
-#      with:
-#        xcode-version: latest-stable
+    - name: Cache multiple paths
+      uses: actions/cache@v2
+      with:
+       path: |
+         ~/state/bazel/disk
+#         ~/state/node_modules
+#        !~/cache/exclude
+       key: ${{ runner.os }}
     - name: build
  #     shell: sh
       env:
         RUST_BACKTRACE: 1
       run: |
          export PATH="/usr/local/opt/pipx_bin:/usr/local/opt/curl/bin:/usr/local/bin:/usr/local/sbin:/Users/runner/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin"
-         ./.buildkite/mac/entrypoint ${{ github.event.inputs.buildArgs }}
+         export STATE=~/state/anki-ci
+         ./.buildkite/mac/entrypoint --disk_cache=~/state/bazel/disk ${{ github.event.inputs.buildArgs }}

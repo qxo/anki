@@ -8,10 +8,10 @@ concurrency:
 # Controls when the workflow will run
 on:
   # Triggers the workflow on push or pull request events but only for the main branch
-#  push:
-#    branches: [ ]
+  push:
+    branches: [ tmp4linux ]
 #    paths:
-#    - .github/workflows/build-on-linux.yml
+#    - .github/workflows/build-on-l.yml
 #  pull_request:
 #    branches: [ main ]
   workflow_call:
@@ -38,6 +38,14 @@ jobs:
       with:
         access_token: ${{ github.token }}
     - uses: actions/checkout@v2
+    - name: Cache multiple paths
+      uses: actions/cache@v2
+      with:
+       path: |
+         /state/bazel/disk
+#         /state/node_modules
+#        !~/cache/exclude
+       key: ${{ runner.os }}
     - name: build
  #     shell: sh
       env:
@@ -84,6 +92,7 @@ jobs:
             python3 --version
             sudo mkdir -p /state/bazel
             sudo chown -R $USER /state
+            sudo rm -rf /state/node_modules
             export BAZEL_VERSION=5.0.0
             sudo curl -fLo /usr/bin/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
             sudo chmod +x /usr/bin/bazel
