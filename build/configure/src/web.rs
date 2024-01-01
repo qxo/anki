@@ -561,7 +561,7 @@ pub fn copy_mathjax() -> impl BuildAction {
         inputs: inputs![":node_modules:mathjax"],
         target_folder: "qt/_aqt/data/web/js/vendor/mathjax",
         strip_prefix: "$builddir/node_modules/mathjax/es5",
-        extra_args: "",
+        extra_args: "-r",
     }
 }
 

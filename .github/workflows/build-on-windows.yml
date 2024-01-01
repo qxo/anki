@@ -43,10 +43,23 @@ jobs:
 #          "C:\Users\runneradmin\.cache\bazel"
 #          "C:\users\runneradmin\_bazel_runneradmin"
 #        key: bazel
-    - uses: Vampire/setup-wsl@v1
+#    - uses: Vampire/setup-wsl@v1
 #    - name: disable wsl
 #      shell: powershell
 #      run: Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
+    - uses: GuillaumeFalourd/setup-rsync@v1.2
+#    - run: rsync --version
+#    - name: Install latest rust toolchain
+#      uses: actions-rs/toolchain@v1
+#      with:
+#        toolchain: "1.74"
+##        toolchain: stable
+#        default: true
+#        override: true
+#    - name: Setup | Rust
+#      uses: ATiltedTree/setup-rust@v1 
+#      with:
+#        rust-version: stable
     - name: build
       shell: cmd
       env:
@@ -55,13 +68,23 @@ jobs:
         #VCVARSALL: x64
         RUST_BACKTRACE: 1
       run: |
-        set PATH=C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin;%PATH%
+        set PATH=C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin;%PATH%;C:\Users\runneradmin\.cargo\bin
         echo %PATH%
         set PATH=%PATH:\\=\%
         mkdir C:\tmp
         set TMP=C:\tmp
         set TEMP=C:\tmp
-        bazel.exe --output_user_root=\bazel\ankici --output_base=\bazel\ankici\base test --config=ci ${{ github.event.inputs.buildArgs }} ...
+        rustup  check
+        bash tools\install-n2
+        tools\build.bat
+#        curl -L -o C:\tmp\ninja-win.zip https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-win.zip
+#        unzip C:\tmp\ninja-win.zip -d C:\Users\runneradmin\.cargo\bin
+#        tools\ninja.bat
+#        tools\build.bat
+#        bash tools\install-n2
+#        pacman -S git rsync
+        #        run.bat
+#        bazel.exe --output_user_root=\bazel\ankici --output_base=\bazel\ankici\base test --config=ci ${{ github.event.inputs.buildArgs }} ...
 #        .\.buildkite\windows\entrypoint.bat ${{ inputs.buildArgs }}
 #        bazel.exe --output_user_root=\bazel\ankici --output_base=\bazel\ankici\base test --disk_cache=~/.cache/bazel/disk --config=ci ...
 #        git worktree add C:\anki

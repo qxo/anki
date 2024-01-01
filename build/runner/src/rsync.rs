@@ -24,6 +24,19 @@ pub struct RsyncArgs {
 pub fn rsync_files(args: RsyncArgs) {
     let output_dir = absolute_msys_path(Utf8Path::new(&args.output_dir));
     run_command(
+        Command::new("echo").arg(output_dir.clone()),
+    );
+    //let mut cmd1: String = String::from("mkdir -p ");
+    //cmd1.push_str(output_dir.clone().as_str());
+    run_command(
+        Command::new("mkdir")
+        .arg("-p")
+        .arg(output_dir.clone()),
+    );
+    run_command(
+        Command::new("sh").arg("."),
+    );
+    run_command(
         Command::new("rsync")
             .current_dir(&args.prefix)
             .arg("--relative")
