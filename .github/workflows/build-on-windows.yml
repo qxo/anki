@@ -1,0 +1,167 @@
+#
+# https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions
+
+name: build-on-windows
+
+concurrency: 
+  group: "${{ github.head_ref || github.run_id }}-build-on-windows"
+  cancel-in-progress: true
+
+# Controls when the workflow will run
+on:
+#  # Triggers the workflow on push or pull request events but only for the main branch
+#  push:
+#    branches: [ main ]
+#  pull_request:
+#    branches: [ main ]
+
+  workflow_call:
+     inputs:
+        buildArgs:
+          description: 'buildArgs ie: --test_verbose_timeout_warnings'
+          required: false
+          type: string
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+     inputs:
+          buildArgs:
+            description: 'buildArgs ie: --test_verbose_timeout_warnings'
+            required: false
+            default: ''
+jobs:
+  build:
+    #runs-on: ubuntu-latest
+#    runs-on: windows-2019
+#    runs-on: windows-latest
+    runs-on: windows-2022
+    strategy:
+      fail-fast: true
+    steps:
+    - uses: actions/checkout@v3
+#    - name: Mount bazel cache
+#      uses: actions/cache@v2
+#     with:
+#        path: |
+#          "C:\Users\runneradmin\.cache\bazel"
+#          "C:\users\runneradmin\_bazel_runneradmin"
+#        key: bazel
+#    - uses: Vampire/setup-wsl@v1
+#    - name: disable wsl
+#      shell: powershell
+#      run: Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
+    #- uses: actions/cache@v3
+    #  id: npm-cache
+    #  with:
+    #    path: node_modules
+    #    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+    #    restore-keys: ${{ runner.os }}-node-
+    #- name: Install Dependencies
+    #  if: steps.npm-cache.outputs.cache-hit != 'true'
+    #  run: yarn install --network-timeout 600000
+    #        yarn config set network-timeout 600000 -g 
+    - name: Cargo Cache
+      uses: actions/cache@v3
+      with:
+        path: C:\Users\runneradmin\.cargo
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          ${{ runner.os }}-cargo
+    - name: Anki Target Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          D:\out\download
+          D:\out\node_modules
+        key: ${{ runner.os }}-anki-download-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-anki-download-${{ hashFiles('**/Cargo.toml') }}
+          ${{ runner.os }}-anki-download
+    - name: Anki pyenv Cache
+      uses: actions/cache@v3
+      with:
+        path: D:\out\pyenv
+        key: ${{ runner.os }}-anki-pyenv-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-anki-pyenv-${{ hashFiles('**/Cargo.toml') }}
+          ${{ runner.os }}-anki-pyenv
+    #- name: Anki node_modules Cache
+    #  uses: actions/cache@v3
+    #  with:
+    #    path: D:\out\node_modules
+    #    key: ${{ runner.os }}-anki-node_modules-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+    #    restore-keys: |
+    #      ${{ runner.os }}-anki-node_modules-${{ hashFiles('**/Cargo.toml') }}
+    #      ${{ runner.os }}-anki-node_modules
+    - uses: actions/cache@v3
+      name: rsync Cache
+      id: rsync-cache
+      with:
+        path: D:\rsync #C:\ProgramData\chocolatey\lib\rsync\tools
+        key: ${{ runner.os }}-rsync-
+        restore-keys: ${{ runner.os }}-rsync-
+#    - shell: cmd
+#      run: |
+#        dir C:\ProgramData\chocolatey\lib\rsync\tools\bin
+#       set PATH=%PATH%;C:\ProgramData\chocolatey\lib\rsync\tools\bin\
+#        rsync --version
+    - name: install-portable-rsync
+      shell: cmd
+      run: |
+        D:
+        cd D:\
+        git clone https://github.com/small-tech/portable-rsync-with-ssh-for-windows.git rsync
+        set PATH=%PATH%;D:\rsync\bin
+        rsync --version
+
+#    - uses: GuillaumeFalourd/setup-rsync@v1.2
+#      if: steps.rsync-cache.outputs.cache-hit != 'true'
+#    - run: yarn config set network-timeout 600000 -g 
+    - name: install-n2-if
+      if: ${{ hashFiles('C:\Users\runneradmin\.cargo\bin\n2.exe') != '' }}
+      run: |
+        set PATH=%PATH%;C:\Users\runneradmin\.cargo\bin;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin
+        bash tools\install-n2
+#    - run: rsync --version
+#    - name: Install latest rust toolchain
+#      uses: actions-rs/toolchain@v1
+#      with:
+#        toolchain: "1.74"
+##        toolchain: stable
+#        default: true
+#        override: true
+#    - name: Setup | Rust
+#      uses: ATiltedTree/setup-rust@v1 
+#      with:
+#        rust-version: stable
+    - name: build
+      shell: cmd
+      env:
+        #VCVARSALLPATH: |
+        #  C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat
+        #VCVARSALL: x64
+        RUST_BACKTRACE: 1
+      run: |
+        set PATH=%PATH%;C:\Users\runneradmin\.cargo\bin;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Git\mingw64\bin;D:\rsync\bin
+        echo %PATH%
+        rsync --version
+        echo network-timeout "60000" >> C:\Users\runneradmin\.yarnrc
+        mkdir D:\bazel
+        mklink /d C:\Users\runneradmin\_bazel_runneradmin D:\bazel
+        mkdir C:\tmp
+        set TMP=C:\tmp
+        set TEMP=C:\tmp
+        rustup check
+        mkdir D:\out
+        mklink /d out D:\out
+        set BUILD_ROOT=D:\out
+        set RELEASE=1
+        tools\build.bat
+#    - run: |
+#        dir out\wheels
+    - name: Archive production artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dist-wheels
+        path: |
+          out/wheels/**
