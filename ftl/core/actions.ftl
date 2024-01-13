@@ -8,10 +8,12 @@ actions-copy = Copy
 actions-create-copy = Create Copy
 actions-custom-study = Custom Study
 actions-decks = Decks
+actions-decrement-value = Decrement value
 actions-delete = Delete
 actions-export = Export
 actions-filter = Filter
 actions-help = Help
+actions-increment-value = Increment value
 actions-import = Import
 actions-manage = Manage...
 actions-name = Name:
@@ -53,6 +55,7 @@ actions-previous-card-info = Previous Card Info
 # By convention, the name of a menu action is suffixed with "..." if additional
 # input is required before it can be performed. E.g. "Export..." vs. "Delete".
 actions-with-ellipsis = { $action }...
+actions-fullscreen-unsupported = Full screen mode is not supported for your video driver. Try switching to a different one from the preferences screen.
 
 ## Flags
 
@@ -65,3 +68,8 @@ actions-flag-pink = Pink
 actions-flag-turquoise = Turquoise
 actions-flag-purple = Purple
 actions-set-flag = Set Flag
+actions-nothing-to-undo = Nothing to undo
+actions-nothing-to-redo = Nothing to redo
+actions-auto-advance = Auto Advance
+actions-auto-advance-activated = Auto Advance enabled
+actions-auto-advance-deactivated = Auto Advance disabled

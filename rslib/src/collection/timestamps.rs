@@ -20,13 +20,32 @@ impl CollectionTimestamps {
 }
 
 impl Collection {
-    pub(crate) fn set_modified(&mut self) -> Result<()> {
+    /// This is done automatically when you call collection methods, so callers
+    /// outside this crate should only need this if you are manually
+    /// modifying the database.
+    pub fn set_modified(&mut self) -> Result<()> {
         let stamps = self.storage.get_collection_timestamps()?;
         self.set_modified_time_undoable(TimestampMillis::now(), stamps.collection_change)
     }
 
-    pub(crate) fn set_schema_modified(&mut self) -> Result<()> {
+    /// Forces the next sync in one direction.
+    pub fn set_schema_modified(&mut self) -> Result<()> {
         let stamps = self.storage.get_collection_timestamps()?;
         self.set_schema_modified_time_undoable(TimestampMillis::now(), stamps.schema_change)
+    }
+
+    pub fn changed_since_last_backup(&self) -> Result<bool> {
+        let stamps = self.storage.get_collection_timestamps()?;
+        Ok(self
+            .state
+            .last_backup_modified
+            .map(|last_backup| last_backup != stamps.collection_change)
+            .unwrap_or(true))
+    }
+
+    pub(crate) fn update_last_backup_timestamp(&mut self) -> Result<()> {
+        self.state.last_backup_modified =
+            Some(self.storage.get_collection_timestamps()?.collection_change);
+        Ok(())
     }
 }

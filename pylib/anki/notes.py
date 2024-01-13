@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, NewType, Sequence
+from typing import NewType, Sequence
 
 import anki  # pylint: disable=unused-import
+import anki.cards
+import anki.collection
+import anki.decks
+import anki.template
 from anki import hooks, notes_pb2
-from anki._legacy import DeprecatedNamesMixin
+from anki._legacy import DeprecatedNamesMixin, deprecated
 from anki.consts import MODEL_STD
 from anki.models import NotetypeDict, NotetypeId, TemplateDict
 from anki.utils import join_fields
@@ -74,9 +78,9 @@ class Note(DeprecatedNamesMixin):
             fields=self.fields,
         )
 
+    @deprecated(info="please use col.update_note()")
     def flush(self) -> None:
-        """This preserves any current checkpoint.
-        For an undo entry, use col.update_note() instead."""
+        """For an undo entry, use col.update_note() instead."""
         if self.id == 0:
             raise Exception("can't flush a new note")
         self.col._backend.update_notes(
@@ -178,7 +182,7 @@ class Note(DeprecatedNamesMixin):
         "Add tag. Duplicates will be stripped on save."
         self.tags.append(tag)
 
-    def string_tags(self) -> Any:
+    def string_tags(self) -> str:
         return self.col.tags.join(self.tags)
 
     def set_tags_from_str(self, tags: str) -> None:

@@ -1,23 +1,30 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use itertools::Itertools;
 use lazy_static::lazy_static;
-use nom::{
-    branch::alt,
-    bytes::complete::{escaped, is_not, tag},
-    character::complete::{anychar, char, none_of, one_of},
-    combinator::{map, verify},
-    error::ErrorKind as NomErrorKind,
-    multi::many0,
-    sequence::{preceded, separated_pair},
-};
-use regex::{Captures, Regex};
+use nom::branch::alt;
+use nom::bytes::complete::escaped;
+use nom::bytes::complete::is_not;
+use nom::bytes::complete::tag;
+use nom::character::complete::alphanumeric1;
+use nom::character::complete::anychar;
+use nom::character::complete::char;
+use nom::character::complete::none_of;
+use nom::character::complete::one_of;
+use nom::combinator::map;
+use nom::combinator::recognize;
+use nom::combinator::verify;
+use nom::error::ErrorKind as NomErrorKind;
+use nom::multi::many0;
+use nom::sequence::preceded;
+use nom::sequence::separated_pair;
+use regex::Captures;
+use regex::Regex;
 
-use crate::{
-    error::{ParseError, Result, SearchErrorKind as FailKind},
-    prelude::*,
-};
+use crate::error::ParseError;
+use crate::error::Result;
+use crate::error::SearchErrorKind as FailKind;
+use crate::prelude::*;
 
 type IResult<'a, O> = std::result::Result<(&'a str, O), nom::Err<ParseError<'a>>>;
 type ParseResult<'a, O> = std::result::Result<O, nom::Err<ParseError<'a>>>;
@@ -27,7 +34,7 @@ fn parse_failure(input: &str, kind: FailKind) -> nom::Err<ParseError<'_>> {
 }
 
 fn parse_error(input: &str) -> nom::Err<ParseError<'_>> {
-    nom::Err::Error(ParseError::Anki(input, FailKind::Other(None)))
+    nom::Err::Error(ParseError::Anki(input, FailKind::Other { info: None }))
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -37,48 +44,6 @@ pub enum Node {
     Not(Box<Node>),
     Group(Vec<Node>),
     Search(SearchNode),
-}
-
-impl Node {
-    pub fn negated(self) -> Node {
-        if let Node::Not(inner) = self {
-            *inner
-        } else {
-            Node::Not(Box::new(self))
-        }
-    }
-
-    /// If we're a group, return the contained elements.
-    /// If we're a single node, return ourselves in an one-element vec.
-    pub fn into_node_list(self) -> Vec<Node> {
-        if let Node::Group(nodes) = self {
-            nodes
-        } else {
-            vec![self]
-        }
-    }
-
-    pub fn all(iter: impl IntoIterator<Item = Node>) -> Node {
-        Node::Group(Itertools::intersperse(iter.into_iter(), Node::And).collect())
-    }
-
-    pub fn any(iter: impl IntoIterator<Item = Node>) -> Node {
-        Node::Group(Itertools::intersperse(iter.into_iter(), Node::Or).collect())
-    }
-}
-
-#[macro_export]
-macro_rules! match_all {
-    ($($param:expr),+ $(,)?) => {
-        $crate::search::Node::all(vec![$($param.into()),+])
-    };
-}
-
-#[macro_export]
-macro_rules! match_any {
-    ($($param:expr),+ $(,)?) => {
-        $crate::search::Node::any(vec![$($param.into()),+])
-    };
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -95,8 +60,8 @@ pub enum SearchNode {
     EditedInDays(u32),
     CardTemplate(TemplateKind),
     Deck(String),
-    /// Matches cards in a single deck (original_deck_id is not checked).
-    DeckIdWithoutChildren(DeckId),
+    /// Matches cards in a list of decks (original_deck_id is not checked).
+    DeckIdsWithoutChildren(String),
     /// Matches cards in a deck or its children (original_deck_id is not
     /// checked).
     DeckIdWithChildren(DeckId),
@@ -107,7 +72,10 @@ pub enum SearchNode {
         days: u32,
         ease: RatingKind,
     },
-    Tag(String),
+    Tag {
+        tag: String,
+        is_re: bool,
+    },
     Duplicates {
         notetype_id: NotetypeId,
         text: String,
@@ -124,6 +92,8 @@ pub enum SearchNode {
     Regex(String),
     NoCombining(String),
     WordBoundary(String),
+    CustomData(String),
+    Preset(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -135,9 +105,14 @@ pub enum PropertyKind {
     Ease(f32),
     Position(u32),
     Rated(i32, RatingKind),
+    Stability(f32),
+    Difficulty(f32),
+    Retrievability(f32),
+    CustomDataNumber { key: String, value: f32 },
+    CustomDataString { key: String, value: String },
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum StateKind {
     New,
     Review,
@@ -149,13 +124,13 @@ pub enum StateKind {
     Suspended,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum TemplateKind {
     Ordinal(u16),
     Name(String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RatingKind {
     AnswerButton(u8),
     AnyAnswerButton,
@@ -174,36 +149,6 @@ pub fn parse(input: &str) -> Result<Vec<Node>> {
         // unmatched ) is only char not consumed by any node parser
         Ok((remaining, _)) => Err(parse_failure(remaining, FailKind::UnopenedGroup).into()),
         Err(err) => Err(err.into()),
-    }
-}
-
-impl From<SearchNode> for Node {
-    fn from(n: SearchNode) -> Self {
-        Node::Search(n)
-    }
-}
-
-impl From<NotetypeId> for Node {
-    fn from(id: NotetypeId) -> Self {
-        Node::Search(SearchNode::NotetypeId(id))
-    }
-}
-
-impl From<TemplateKind> for Node {
-    fn from(k: TemplateKind) -> Self {
-        Node::Search(SearchNode::CardTemplate(k))
-    }
-}
-
-impl From<NoteId> for Node {
-    fn from(n: NoteId) -> Self {
-        Node::Search(SearchNode::NoteIds(format!("{}", n)))
-    }
-}
-
-impl From<StateKind> for Node {
-    fn from(k: StateKind) -> Self {
-        Node::Search(SearchNode::State(k))
     }
 }
 
@@ -326,13 +271,20 @@ fn unquoted_term(s: &str) -> IResult<Node> {
             if let nom::Err::Error((c, NomErrorKind::NoneOf)) = err {
                 Err(parse_failure(
                     s,
-                    FailKind::UnknownEscape(format!("\\{}", c)),
+                    FailKind::UnknownEscape {
+                        provided: format!("\\{}", c),
+                    },
                 ))
             } else if "\"() \u{3000}".contains(s.chars().next().unwrap()) {
                 Err(parse_error(s))
             } else {
                 // input ends in an odd number of backslashes
-                Err(parse_failure(s, FailKind::UnknownEscape('\\'.to_string())))
+                Err(parse_failure(
+                    s,
+                    FailKind::UnknownEscape {
+                        provided: '\\'.to_string(),
+                    },
+                ))
             }
         }
     }
@@ -384,7 +336,7 @@ fn search_node_for_text_with_argument<'a>(
     Ok(match key.to_ascii_lowercase().as_str() {
         "deck" => SearchNode::Deck(unescape(val)?),
         "note" => SearchNode::Notetype(unescape(val)?),
-        "tag" => SearchNode::Tag(unescape(val)?),
+        "tag" => parse_tag(val)?,
         "card" => parse_template(val)?,
         "flag" => parse_flag(val)?,
         "resched" => parse_resched(val)?,
@@ -394,7 +346,7 @@ fn search_node_for_text_with_argument<'a>(
         "introduced" => parse_introduced(val)?,
         "rated" => parse_rated(val)?,
         "is" => parse_state(val)?,
-        "did" => parse_did(val)?,
+        "did" => SearchNode::DeckIdsWithoutChildren(check_id_list(val, key)?.into()),
         "mid" => parse_mid(val)?,
         "nid" => SearchNode::NoteIds(check_id_list(val, key)?.into()),
         "cid" => SearchNode::CardIds(check_id_list(val, key)?.into()),
@@ -402,8 +354,24 @@ fn search_node_for_text_with_argument<'a>(
         "nc" => SearchNode::NoCombining(unescape(val)?),
         "w" => SearchNode::WordBoundary(unescape(val)?),
         "dupe" => parse_dupe(val)?,
+        "has-cd" => SearchNode::CustomData(unescape(val)?),
+        "preset" => SearchNode::Preset(val.into()),
         // anything else is a field search
         _ => parse_single_field(key, val)?,
+    })
+}
+
+fn parse_tag(s: &str) -> ParseResult<SearchNode> {
+    Ok(if let Some(re) = s.strip_prefix("re:") {
+        SearchNode::Tag {
+            tag: unescape_quotes(re),
+            is_re: true,
+        }
+    } else {
+        SearchNode::Tag {
+            tag: unescape(s)?,
+            is_re: false,
+        }
     })
 }
 
@@ -446,11 +414,18 @@ fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
         tag("pos"),
         tag("rated"),
         tag("resched"),
+        tag("s"),
+        tag("d"),
+        tag("r"),
+        recognize(preceded(tag("cdn:"), alphanumeric1)),
+        recognize(preceded(tag("cds:"), alphanumeric1)),
     ))(prop_clause)
     .map_err(|_| {
         parse_failure(
             prop_clause,
-            FailKind::InvalidPropProperty(prop_clause.into()),
+            FailKind::InvalidPropProperty {
+                provided: prop_clause.into(),
+            },
         )
     })?;
 
@@ -462,7 +437,14 @@ fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
         tag("<"),
         tag(">"),
     ))(tail)
-    .map_err(|_| parse_failure(prop_clause, FailKind::InvalidPropOperator(prop.to_string())))?;
+    .map_err(|_| {
+        parse_failure(
+            prop_clause,
+            FailKind::InvalidPropOperator {
+                provided: prop.to_string(),
+            },
+        )
+    })?;
 
     let kind = match prop {
         "ease" => PropertyKind::Ease(parse_f32(num, prop_clause)?),
@@ -476,6 +458,17 @@ fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
         "reps" => PropertyKind::Reps(parse_u32(num, prop_clause)?),
         "lapses" => PropertyKind::Lapses(parse_u32(num, prop_clause)?),
         "pos" => PropertyKind::Position(parse_u32(num, prop_clause)?),
+        "s" => PropertyKind::Stability(parse_f32(num, prop_clause)?),
+        "d" => PropertyKind::Difficulty(parse_f32(num, prop_clause)?),
+        "r" => PropertyKind::Retrievability(parse_f32(num, prop_clause)?),
+        prop if prop.starts_with("cdn:") => PropertyKind::CustomDataNumber {
+            key: prop.strip_prefix("cdn:").unwrap().into(),
+            value: parse_f32(num, prop_clause)?,
+        },
+        prop if prop.starts_with("cds:") => PropertyKind::CustomDataString {
+            key: prop.strip_prefix("cds:").unwrap().into(),
+            value: num.into(),
+        },
         _ => unreachable!(),
     };
 
@@ -612,21 +605,22 @@ fn parse_state(s: &str) -> ParseResult<SearchNode> {
         "buried-manually" => UserBuried,
         "buried-sibling" => SchedBuried,
         "suspended" => Suspended,
-        _ => return Err(parse_failure(s, FailKind::InvalidState(s.into()))),
+        _ => {
+            return Err(parse_failure(
+                s,
+                FailKind::InvalidState { provided: s.into() },
+            ))
+        }
     }))
-}
-
-fn parse_did(s: &str) -> ParseResult<SearchNode> {
-    parse_i64(s, "did:").map(|n| SearchNode::DeckIdWithoutChildren(n.into()))
 }
 
 fn parse_mid(s: &str) -> ParseResult<SearchNode> {
     parse_i64(s, "mid:").map(|n| SearchNode::NotetypeId(n.into()))
 }
 
-/// ensure a list of ids contains only numbers and commas, returning unchanged if true
-/// used by nid: and cid:
-fn check_id_list<'a, 'b>(s: &'a str, context: &'b str) -> ParseResult<'a, &'a str> {
+/// ensure a list of ids contains only numbers and commas, returning unchanged
+/// if true used by nid: and cid:
+fn check_id_list<'a>(s: &'a str, context: &str) -> ParseResult<'a, &'a str> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"^(\d+,)*\d+$").unwrap();
     }
@@ -636,10 +630,9 @@ fn check_id_list<'a, 'b>(s: &'a str, context: &'b str) -> ParseResult<'a, &'a st
         Err(parse_failure(
             s,
             // id lists are undocumented, so no translation
-            FailKind::Other(Some(format!(
-                "expected only digits and commas in {}:",
-                context
-            ))),
+            FailKind::Other {
+                info: Some(format!("expected only digits and commas in {}:", context)),
+            },
         ))
     }
 }
@@ -657,7 +650,9 @@ fn parse_dupe(s: &str) -> ParseResult<SearchNode> {
         // this is an undocumented keyword, so no translation/help
         Err(parse_failure(
             s,
-            FailKind::Other(Some("invalid 'dupe:' search".into())),
+            FailKind::Other {
+                info: Some("invalid 'dupe:' search".into()),
+            },
         ))
     }
 }
@@ -699,7 +694,10 @@ fn unescape_quotes_and_backslashes(s: &str) -> String {
 /// Unescape chars with special meaning to the parser.
 fn unescape(txt: &str) -> ParseResult<String> {
     if let Some(seq) = invalid_escape_sequence(txt) {
-        Err(parse_failure(txt, FailKind::UnknownEscape(seq)))
+        Err(parse_failure(
+            txt,
+            FailKind::UnknownEscape { provided: seq },
+        ))
     } else {
         Ok(if is_parser_escape(txt) {
             lazy_static! {
@@ -768,8 +766,8 @@ mod test {
         use Node::*;
         use SearchNode::*;
 
-        assert_eq!(parse("")?, vec![Search(SearchNode::WholeCollection)]);
-        assert_eq!(parse("  ")?, vec![Search(SearchNode::WholeCollection)]);
+        assert_eq!(parse("")?, vec![Search(WholeCollection)]);
+        assert_eq!(parse("  ")?, vec![Search(WholeCollection)]);
 
         // leading/trailing/interspersed whitespace
         assert_eq!(
@@ -839,8 +837,8 @@ mod test {
 
         // parser doesn't unescape unescape \*_
         assert_eq!(
-            parse(r#"\\\*\_"#)?,
-            vec![Search(UnqualifiedText(r#"\\\*\_"#.into())),]
+            parse(r"\\\*\_")?,
+            vec![Search(UnqualifiedText(r"\\\*\_".into())),]
         );
 
         // escaping parentheses is optional (only) inside quotes
@@ -892,8 +890,26 @@ mod test {
             vec![Search(Deck("default one".into()))]
         );
 
+        assert_eq!(
+            parse("preset:default")?,
+            vec![Search(Preset("default".into()))]
+        );
+
         assert_eq!(parse("note:basic")?, vec![Search(Notetype("basic".into()))]);
-        assert_eq!(parse("tag:hard")?, vec![Search(Tag("hard".into()))]);
+        assert_eq!(
+            parse("tag:hard")?,
+            vec![Search(Tag {
+                tag: "hard".into(),
+                is_re: false
+            })]
+        );
+        assert_eq!(
+            parse(r"tag:re:\\")?,
+            vec![Search(Tag {
+                tag: r"\\".into(),
+                is_re: true
+            })]
+        );
         assert_eq!(
             parse("nid:1237123712,2,3")?,
             vec![Search(NoteIds("1237123712,2,3".into()))]
@@ -915,6 +931,37 @@ mod test {
                 kind: PropertyKind::Ease(3.3)
             })]
         );
+        assert_eq!(
+            parse("prop:cdn:abc<=1")?,
+            vec![Search(Property {
+                operator: "<=".into(),
+                kind: PropertyKind::CustomDataNumber {
+                    key: "abc".into(),
+                    value: 1.0
+                }
+            })]
+        );
+        assert_eq!(
+            parse("prop:cds:abc=foo")?,
+            vec![Search(Property {
+                operator: "=".into(),
+                kind: PropertyKind::CustomDataString {
+                    key: "abc".into(),
+                    value: "foo".into()
+                }
+            })]
+        );
+        assert_eq!(
+            parse("\"prop:cds:abc=foo bar\"")?,
+            vec![Search(Property {
+                operator: "=".into(),
+                kind: PropertyKind::CustomDataString {
+                    key: "abc".into(),
+                    value: "foo bar".into()
+                }
+            })]
+        );
+        assert_eq!(parse("has-cd:r")?, vec![Search(CustomData("r".into()))]);
 
         Ok(())
     }
@@ -926,11 +973,11 @@ mod test {
         use crate::error::AnkiError;
 
         fn assert_err_kind(input: &str, kind: FailKind) {
-            assert_eq!(parse(input), Err(AnkiError::SearchError(kind)));
+            assert_eq!(parse(input), Err(AnkiError::SearchError { source: kind }));
         }
 
         fn failkind(input: &str) -> SearchErrorKind {
-            if let Err(AnkiError::SearchError(err)) = parse(input) {
+            if let Err(AnkiError::SearchError { source: err }) = parse(input) {
                 err
             } else {
                 panic!("expected search error");
@@ -970,12 +1017,42 @@ mod test {
         assert_err_kind(":foo", MissingKey);
         assert_err_kind(r#":"foo""#, MissingKey);
 
-        assert_err_kind(r"\", UnknownEscape(r"\".to_string()));
-        assert_err_kind(r"\%", UnknownEscape(r"\%".to_string()));
-        assert_err_kind(r"foo\", UnknownEscape(r"\".to_string()));
-        assert_err_kind(r"\foo", UnknownEscape(r"\f".to_string()));
-        assert_err_kind(r"\ ", UnknownEscape(r"\".to_string()));
-        assert_err_kind(r#""\ ""#, UnknownEscape(r"\ ".to_string()));
+        assert_err_kind(
+            r"\",
+            UnknownEscape {
+                provided: r"\".to_string(),
+            },
+        );
+        assert_err_kind(
+            r"\%",
+            UnknownEscape {
+                provided: r"\%".to_string(),
+            },
+        );
+        assert_err_kind(
+            r"foo\",
+            UnknownEscape {
+                provided: r"\".to_string(),
+            },
+        );
+        assert_err_kind(
+            r"\foo",
+            UnknownEscape {
+                provided: r"\f".to_string(),
+            },
+        );
+        assert_err_kind(
+            r"\ ",
+            UnknownEscape {
+                provided: r"\".to_string(),
+            },
+        );
+        assert_err_kind(
+            r#""\ ""#,
+            UnknownEscape {
+                provided: r"\ ".to_string(),
+            },
+        );
 
         for term in &[
             "nid:1_2,3",
@@ -987,14 +1064,39 @@ mod test {
             "cid:,2,3",
             "cid:1,2,",
         ] {
-            assert!(matches!(failkind(term), SearchErrorKind::Other(_)));
+            assert!(matches!(failkind(term), SearchErrorKind::Other { .. }));
         }
 
-        assert_err_kind("is:foo", InvalidState("foo".into()));
-        assert_err_kind("is:DUE", InvalidState("DUE".into()));
-        assert_err_kind("is:New", InvalidState("New".into()));
-        assert_err_kind("is:", InvalidState("".into()));
-        assert_err_kind(r#""is:learn ""#, InvalidState("learn ".into()));
+        assert_err_kind(
+            "is:foo",
+            InvalidState {
+                provided: "foo".into(),
+            },
+        );
+        assert_err_kind(
+            "is:DUE",
+            InvalidState {
+                provided: "DUE".into(),
+            },
+        );
+        assert_err_kind(
+            "is:New",
+            InvalidState {
+                provided: "New".into(),
+            },
+        );
+        assert_err_kind(
+            "is:",
+            InvalidState {
+                provided: "".into(),
+            },
+        );
+        assert_err_kind(
+            r#""is:learn ""#,
+            InvalidState {
+                provided: "learn ".into(),
+            },
+        );
 
         assert_err_kind(r#""flag: ""#, InvalidFlag);
         assert_err_kind("flag:-0", InvalidFlag);
@@ -1051,13 +1153,67 @@ mod test {
             SearchErrorKind::InvalidWholeNumber { .. }
         ));
 
-        assert_err_kind("prop:", InvalidPropProperty("".into()));
-        assert_err_kind("prop:=1", InvalidPropProperty("=1".into()));
-        assert_err_kind("prop:DUE<5", InvalidPropProperty("DUE<5".into()));
+        assert_err_kind(
+            "prop:",
+            InvalidPropProperty {
+                provided: "".into(),
+            },
+        );
+        assert_err_kind(
+            "prop:=1",
+            InvalidPropProperty {
+                provided: "=1".into(),
+            },
+        );
+        assert_err_kind(
+            "prop:DUE<5",
+            InvalidPropProperty {
+                provided: "DUE<5".into(),
+            },
+        );
+        assert_err_kind(
+            "prop:cdn=5",
+            InvalidPropProperty {
+                provided: "cdn=5".to_string(),
+            },
+        );
+        assert_err_kind(
+            "prop:cdn:=5",
+            InvalidPropProperty {
+                provided: "cdn:=5".to_string(),
+            },
+        );
+        assert_err_kind(
+            "prop:cds=s",
+            InvalidPropProperty {
+                provided: "cds=s".to_string(),
+            },
+        );
+        assert_err_kind(
+            "prop:cds:=s",
+            InvalidPropProperty {
+                provided: "cds:=s".to_string(),
+            },
+        );
 
-        assert_err_kind("prop:lapses", InvalidPropOperator("lapses".to_string()));
-        assert_err_kind("prop:pos~1", InvalidPropOperator("pos".to_string()));
-        assert_err_kind("prop:reps10", InvalidPropOperator("reps".to_string()));
+        assert_err_kind(
+            "prop:lapses",
+            InvalidPropOperator {
+                provided: "lapses".to_string(),
+            },
+        );
+        assert_err_kind(
+            "prop:pos~1",
+            InvalidPropOperator {
+                provided: "pos".to_string(),
+            },
+        );
+        assert_err_kind(
+            "prop:reps10",
+            InvalidPropOperator {
+                provided: "reps".to_string(),
+            },
+        );
 
         // unsigned
 
@@ -1105,15 +1261,5 @@ mod test {
             failkind("prop:ease<1,3"),
             SearchErrorKind::InvalidNumber { .. }
         ));
-    }
-
-    #[test]
-    fn negating() {
-        let node = Node::Search(SearchNode::UnqualifiedText("foo".to_string()));
-        let neg_node = Node::Not(Box::new(Node::Search(SearchNode::UnqualifiedText(
-            "foo".to_string(),
-        ))));
-        assert_eq!(node.clone().negated(), neg_node);
-        assert_eq!(node.clone().negated().negated(), node);
     }
 }

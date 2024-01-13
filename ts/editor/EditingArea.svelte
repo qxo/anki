@@ -4,14 +4,32 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script context="module" lang="ts">
     import type { Writable } from "svelte/store";
+
     import contextProperty from "../sveltelib/context-property";
 
-    export interface EditingInputAPI {
+    export interface FocusableInputAPI {
         readonly name: string;
-        focus(): void;
-        refocus(): void;
         focusable: boolean;
-        moveCaretToEnd(): void;
+        /**
+         * The reaction to a user-initiated focus, e.g. by clicking on the
+         * editor label, or pressing Tab.
+         */
+        focus(): void;
+        /**
+         * Behaves similar to a refresh, e.g. sync with content, put the caret
+         * into a neutral position, and/or clear selections.
+         */
+        refocus(): void;
+    }
+
+    export interface EditingInputAPI extends FocusableInputAPI {
+        /**
+         * Check whether blurred target belongs to an editing input.
+         * The editing area can then restore focus to this input.
+         *
+         * @returns An editing input api that is associated with the event target.
+         */
+        getInputAPI(target: EventTarget): Promise<FocusableInputAPI | null>;
     }
 
     export interface EditingAreaAPI {
@@ -22,16 +40,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     const key = Symbol("editingArea");
-    const [set, getEditingArea, hasEditingArea] = contextProperty<EditingAreaAPI>(key);
+    const [context, setContextProperty] = contextProperty<EditingAreaAPI>(key);
 
-    export { getEditingArea, hasEditingArea };
+    export { context };
 </script>
 
 <script lang="ts">
-    import FocusTrap from "./FocusTrap.svelte";
+    import { fontFamilyKey, fontSizeKey } from "@tslib/context-keys";
+    import { setContext as svelteSetContext } from "svelte";
     import { writable } from "svelte/store";
-    import { onMount, setContext as svelteSetContext } from "svelte";
-    import { fontFamilyKey, fontSizeKey } from "../lib/context-keys";
 
     export let fontFamily: string;
     const fontFamilyStore = writable(fontFamily);
@@ -44,10 +61,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     svelteSetContext(fontSizeKey, fontSizeStore);
 
     export let content: Writable<string>;
-    export let autofocus = false;
 
     let editingArea: HTMLElement;
-    let focusTrap: FocusTrap;
 
     const inputsStore = writable<EditingInputAPI[]>([]);
     $: editingInputs = $inputsStore;
@@ -56,39 +71,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         return editingInputs.find((input) => input.focusable);
     }
 
-    function focusEditingInputIfAvailable(): boolean {
-        const availableInput = getAvailableInput();
-
-        if (availableInput) {
-            availableInput.focus();
-            return true;
-        }
-
-        return false;
-    }
-
-    function focusEditingInputIfFocusTrapFocused(): void {
-        if (focusTrap && focusTrap.isFocusTrap(document.activeElement!)) {
-            focusEditingInputIfAvailable();
-        }
-    }
-
-    $: {
-        $inputsStore;
-        /**
-         * Triggers when all editing inputs are hidden,
-         * the editor field has focus, and then some
-         * editing input is shown
-         */
-        focusEditingInputIfFocusTrapFocused();
-    }
-
     function focus(): void {
-        if (editingArea.contains(document.activeElement)) {
-            // do nothing
-        } else if (!focusEditingInputIfAvailable()) {
-            focusTrap.focus();
-        }
+        editingArea.contains(document.activeElement);
     }
 
     function refocus(): void {
@@ -96,49 +80,23 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
         if (availableInput) {
             availableInput.refocus();
-        } else {
-            focusTrap.blur();
-            focusTrap.focus();
         }
     }
 
-    function focusEditingInputInsteadIfAvailable(event: FocusEvent): void {
-        if (focusEditingInputIfAvailable()) {
-            event.preventDefault();
-        }
-    }
+    let apiPartial: Partial<EditingAreaAPI>;
+    export { apiPartial as api };
 
-    // prevents editor field being entirely deselected when
-    // closing active field
-    function trapFocusOnBlurOut(event: FocusEvent): void {
-        if (!event.relatedTarget && editingInputs.every((input) => !input.focusable)) {
-            focusTrap.focus();
-            event.preventDefault();
-        }
-    }
-
-    export let api: Partial<EditingAreaAPI>;
-
-    Object.assign(
-        api,
-        set({
-            content,
-            editingInputs: inputsStore,
-            focus,
-            refocus,
-        }),
-    );
-
-    onMount(() => {
-        if (autofocus) {
-            focus();
-        }
+    const api = Object.assign(apiPartial, {
+        content,
+        editingInputs: inputsStore,
+        focus,
+        refocus,
     });
+
+    setContextProperty(api);
 </script>
 
-<FocusTrap bind:this={focusTrap} on:focus={focusEditingInputInsteadIfAvailable} />
-
-<div bind:this={editingArea} class="editing-area" on:focusout={trapFocusOnBlurOut}>
+<div bind:this={editingArea} class="editing-area">
     <slot />
 </div>
 
@@ -148,12 +106,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         /* TODO allow configuration of grid #1503 */
         /* grid-template-columns: repeat(2, 1fr); */
 
-        position: relative;
-        background: var(--frame-bg);
-        border-radius: 0 0 5px 5px;
-
-        &:focus {
-            outline: none;
-        }
+        /* This defines the border between inputs */
+        grid-gap: 1px;
+        background-color: var(--border);
     }
 </style>

@@ -1,3 +1,5 @@
+notetypes-notetype = Notetype
+
 ## Default field names in newly created note types
 
 notetypes-front-field = Front
@@ -33,3 +35,23 @@ notetypes-note-types = Note Types
 notetypes-options = Options
 notetypes-please-add-another-note-type-first = Please add another note type first.
 notetypes-type = Type
+
+## Image Occlusion
+
+notetypes-image = Image
+notetypes-occlusion = Occlusion
+notetypes-occlusion-mask = Mask
+notetypes-occlusion-note = Note
+notetypes-comments-field = Comments
+notetypes-toggle-masks = Toggle Masks
+notetypes-image-occlusion-name = Image Occlusion
+notetypes-hide-all-guess-one = Hide All, Guess One
+notetypes-hide-one-guess-one = Hide One, Guess One
+notetypes-error-generating-cloze = An error occurred when generating an image occlusion note
+notetypes-error-getting-imagecloze = An error occurred while fetching an image occlusion note
+notetypes-error-loading-image-occlusion = Error loading image occlusion. Is your Anki version up to date?
+notetype-error-no-image-to-show = No image to show.
+notetypes-no-occlusion-created = You must make at least one occlusion.
+notetypes-no-occlusion-created2 = Unable to add. Either you have not added any occlusions, or the first field is empty.
+notetypes-io-select-image = Select Image
+notetypes-io-paste-image-from-clipboard = Paste Image from Clipboard

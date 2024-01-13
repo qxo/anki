@@ -4,16 +4,18 @@ use std::borrow::Cow;
 
 use itertools::Itertools;
 
-use crate::{prelude::*, text::normalize_to_nfc};
+use crate::prelude::*;
+use crate::text::normalize_to_nfc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NativeDeckName(String);
 
 impl NativeDeckName {
     /// Create from a '::'-separated string
-    pub fn from_human_name(name: &str) -> Self {
+    pub fn from_human_name(name: impl AsRef<str>) -> Self {
         NativeDeckName(
-            name.split("::")
+            name.as_ref()
+                .split("::")
                 .map(normalized_deck_name_component)
                 .join("\x1f"),
         )
@@ -42,7 +44,8 @@ impl NativeDeckName {
         self.0.split('\x1f')
     }
 
-    /// Normalize the name's components if necessary. True if mutation took place.
+    /// Normalize the name's components if necessary. True if mutation took
+    /// place.
     pub(crate) fn maybe_normalize(&mut self) -> bool {
         let needs_normalization = self
             .components()
@@ -57,12 +60,14 @@ impl NativeDeckName {
     }
 
     /// Determine name to rename a deck to, when `self` is dropped on `target`.
-    /// `target` being unset represents a drop at the top or bottom of the deck list.
-    /// The returned name should be used to replace `self`.
+    /// `target` being unset represents a drop at the top or bottom of the deck
+    /// list. The returned name should be used to replace `self`.
     pub(crate) fn reparented_name(&self, target: Option<&NativeDeckName>) -> Option<Self> {
         let dragged_base = self.0.rsplit('\x1f').next().unwrap();
+        let dragged_root = self.components().next().unwrap();
         if let Some(target) = target {
-            if target.0.starts_with(&self.0) {
+            let target_root = target.components().next().unwrap();
+            if target.0.starts_with(&self.0) && target_root == dragged_root {
                 // foo onto foo::bar, or foo onto itself -> no-op
                 None
             } else {
@@ -75,8 +80,8 @@ impl NativeDeckName {
         }
     }
 
-    /// Replace the old parent's name with the new parent's name in self's name, where the old
-    /// parent's name is expected to be a prefix.
+    /// Replace the old parent's name with the new parent's name in self's name,
+    /// where the old parent's name is expected to be a prefix.
     fn reparent(&mut self, old_parent: &NativeDeckName, new_parent: &NativeDeckName) {
         self.0 = std::iter::once(new_parent.as_native_str())
             .chain(self.components().skip(old_parent.components().count()))
@@ -97,11 +102,21 @@ impl Deck {
 }
 
 impl Collection {
-    pub fn get_all_normal_deck_names(&mut self) -> Result<Vec<(DeckId, String)>> {
+    pub fn get_all_normal_deck_names(
+        &mut self,
+        skip_default: bool,
+    ) -> Result<Vec<(DeckId, String)>> {
         Ok(self
             .storage
             .get_all_deck_names()?
             .into_iter()
+            .filter(|node| {
+                if skip_default {
+                    node.0 != DeckId(1)
+                } else {
+                    true
+                }
+            })
             .filter(|(id, _name)| match self.get_deck(*id) {
                 Ok(Some(deck)) => !deck.is_filtered(),
                 _ => true,
@@ -111,7 +126,7 @@ impl Collection {
 
     pub fn rename_deck(&mut self, did: DeckId, new_human_name: &str) -> Result<OpOutput<()>> {
         self.transact(Op::RenameDeck, |col| {
-            let existing_deck = col.storage.get_deck(did)?.ok_or(AnkiError::NotFound)?;
+            let existing_deck = col.storage.get_deck(did)?.or_not_found(did)?;
             let mut deck = existing_deck.clone();
             deck.name = NativeDeckName::from_human_name(new_human_name);
             col.update_deck_inner(&mut deck, existing_deck, col.usn()?)
@@ -149,8 +164,8 @@ impl Collection {
         Ok(())
     }
 
-    pub fn get_all_deck_names(&self, skip_empty_default: bool) -> Result<Vec<(DeckId, String)>> {
-        if skip_empty_default && self.default_deck_is_empty()? {
+    pub fn get_all_deck_names(&self, skip_default: bool) -> Result<Vec<(DeckId, String)>> {
+        if skip_default {
             Ok(self
                 .storage
                 .get_all_deck_names()?
@@ -181,7 +196,7 @@ fn normalized_deck_name_component(comp: &str) -> Cow<str> {
     if out.contains(invalid_char_for_deck_component) {
         out = out.replace(invalid_char_for_deck_component, "").into();
     }
-    let trimmed = out.trim();
+    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == ':');
     if trimmed.is_empty() {
         "blank".to_string().into()
     } else if trimmed.len() != out.len() {
@@ -221,6 +236,8 @@ mod test {
         // implicitly normalize
         assert_eq!(native_name("fo\x1fo::ba\nr"), "foo\x1fbar");
         assert_eq!(native_name("fo\u{a}o\x1fbar"), "foobar");
+        assert_eq!(native_name("foo:::bar"), "foo\x1fbar");
+        assert_eq!(native_name("foo:::bar:baz: "), "foo\x1fbar:baz");
     }
 
     #[test]
@@ -242,7 +259,7 @@ mod test {
     fn drag_drop() {
         // use custom separator to make the tests easier to read
         fn n(s: &str) -> NativeDeckName {
-            NativeDeckName(s.replace(":", "\x1f"))
+            NativeDeckName(s.replace(':', "\x1f"))
         }
 
         #[allow(clippy::unnecessary_wraps)]
@@ -273,5 +290,7 @@ mod test {
         assert_eq!(reparented_name("drag", Some("drag:child:grandchild")), None);
         // name doesn't change when deck dropped on itself
         assert_eq!(reparented_name("foo:bar", Some("foo:bar")), None);
+        // names that are prefixes of the target are handled correctly
+        assert_eq!(reparented_name("a", Some("ab")), n_opt("ab:a"));
     }
 }

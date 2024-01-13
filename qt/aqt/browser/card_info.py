@@ -8,6 +8,7 @@ from typing import Callable
 
 import aqt
 from anki.cards import Card, CardId
+from anki.errors import NotFoundError
 from anki.lang import without_unicode_isolation
 from aqt.qt import *
 from aqt.utils import (
@@ -19,7 +20,7 @@ from aqt.utils import (
     setWindowIcon,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class CardInfoDialog(QDialog):
@@ -48,11 +49,11 @@ class CardInfoDialog(QDialog):
     def _setup_ui(self, card_id: CardId | None) -> None:
         self.mw.garbage_collect_on_dialog_finish(self)
         disable_help_button(self)
-        restoreGeom(self, self.GEOMETRY_KEY)
+        restoreGeom(self, self.GEOMETRY_KEY, default_size=(800, 800))
         addCloseShortcut(self)
         setWindowIcon(self)
 
-        self.web = AnkiWebView(title=self.TITLE)
+        self.web = AnkiWebView(kind=AnkiWebViewKind.BROWSER_CARD_INFO)
         self.web.setVisible(False)
         self.web.load_ts_page("card-info")
         layout = QVBoxLayout()
@@ -63,11 +64,16 @@ class CardInfoDialog(QDialog):
         layout.addWidget(buttons)
         qconnect(buttons.rejected, self.reject)
         self.setLayout(layout)
+        self.web.eval("anki.cardInfoPromise = anki.setupCardInfo(document.body);")
         self.update_card(card_id)
 
     def update_card(self, card_id: CardId | None) -> None:
+        try:
+            self.mw.col.get_card(card_id)
+        except NotFoundError:
+            card_id = None
         self.web.eval(
-            f"anki.cardInfoPromise.then((c) => c.$set({{ cardId: {json.dumps(card_id)} }}));"
+            f"anki.cardInfoPromise.then((c) => c.updateStats({json.dumps(card_id)}));"
         )
 
     def reject(self) -> None:
@@ -89,9 +95,10 @@ class CardInfoManager:
         self._card: Card | None = None
         self._dialog: CardInfoDialog | None = None
 
-    def toggle(self) -> None:
+    def show(self) -> None:
         if self._dialog:
-            self._dialog.reject()
+            self._dialog.activateWindow()
+            self._dialog.raise_()
         else:
             self._dialog = CardInfoDialog(
                 None,
@@ -109,7 +116,7 @@ class CardInfoManager:
 
     def close(self) -> None:
         if self._dialog:
-            self.toggle()
+            self._dialog.reject()
 
     def _on_close(self) -> None:
         self._dialog = None

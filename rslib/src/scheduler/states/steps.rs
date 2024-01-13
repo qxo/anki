@@ -2,6 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 const DEFAULT_SECS_IF_MISSING: u32 = 60;
+const DAY: u32 = 60 * 60 * 24;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LearningSteps<'a> {
@@ -46,17 +47,28 @@ impl<'a> LearningSteps<'a> {
             // if current is invalid, try first step
             .or_else(|| self.steps.first().copied().map(to_secs))
             .map(|current| {
-                // special case to avoid Hard and Again showing same interval
                 if idx == 0 {
-                    // if there is no next step, simulate one with twice the interval of `current`
-                    let next = self
-                        .secs_at_index(idx + 1)
-                        .unwrap_or_else(|| current.saturating_mul(2));
-                    current.saturating_add(next) / 2
+                    self.hard_delay_secs_for_first_step(current)
                 } else {
                     current
                 }
             })
+    }
+
+    /// Special case the hard interval for the first step to avoid equality with
+    /// the again interval. Also ensure it's smaller than the good interval,
+    /// at least with reasonable settings.
+    fn hard_delay_secs_for_first_step(self, again_secs: u32) -> u32 {
+        if let Some(next) = self.secs_at_index(1) {
+            // average of first (again) and second (good) steps
+            maybe_round_in_days(again_secs.saturating_add(next) / 2)
+        } else {
+            // 50% more than the again secs, but at most one day more
+            // otherwise, a learning step of 3 days and a graduating interval of 4 days e.g.
+            // would lead to the hard interval being larger than the good interval
+            let secs = (again_secs.saturating_mul(3) / 2).min(again_secs.saturating_add(DAY));
+            maybe_round_in_days(secs)
+        }
     }
 
     pub(crate) fn good_delay_secs(self, remaining: u32) -> Option<u32> {
@@ -79,6 +91,17 @@ impl<'a> LearningSteps<'a> {
     }
 }
 
+/// If the given interval in seconds surpasses 1 day, rounds it to a whole
+/// number of days. Ensures that the user gets the same results earlier and
+/// later in the day. Returns seconds.
+fn maybe_round_in_days(secs: u32) -> u32 {
+    if secs > DAY {
+        ((secs as f32 / DAY as f32).round() as u32).saturating_mul(DAY)
+    } else {
+        secs
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -94,7 +117,10 @@ mod test {
 
     #[test]
     fn delay_secs() {
+        // if no other step, hard delay is 50% above again secs
         assert_delay_secs!([10.0], 1, 600, Some(900), None);
+        // but at most one day more than again secs
+        assert_delay_secs!([(3 * DAY / 60) as f32], 1, 3 * DAY, Some(4 * DAY), None);
 
         assert_delay_secs!([1.0, 10.0], 2, 60, Some(330), Some(600));
         assert_delay_secs!([1.0, 10.0], 1, 60, Some(600), None);
@@ -102,5 +128,11 @@ mod test {
         assert_delay_secs!([1.0, 10.0, 100.0], 3, 60, Some(330), Some(600));
         assert_delay_secs!([1.0, 10.0, 100.0], 2, 60, Some(600), Some(6000));
         assert_delay_secs!([1.0, 10.0, 100.0], 1, 60, Some(6000), None);
+    }
+
+    #[test]
+    fn rounding_days() {
+        assert_eq!(maybe_round_in_days(DAY - 1), DAY - 1);
+        assert_eq!(maybe_round_in_days((1.5 * DAY as f32) as u32), 2 * DAY);
     }
 }

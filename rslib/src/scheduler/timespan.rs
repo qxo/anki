@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::i18n::I18n;
+use anki_i18n::I18n;
 
 /// Short string like '4d' to place above answer buttons.
 pub fn answer_button_time(seconds: f32, tr: &I18n) -> String {
@@ -58,7 +58,7 @@ const MINUTE: f32 = 60.0 * SECOND;
 const HOUR: f32 = 60.0 * MINUTE;
 const DAY: f32 = 24.0 * HOUR;
 const MONTH: f32 = 30.0 * DAY;
-const YEAR: f32 = 12.0 * MONTH;
+const YEAR: f32 = 365.0 * DAY;
 
 #[derive(Clone, Copy)]
 pub(crate) enum TimespanUnit {
@@ -166,10 +166,11 @@ impl Timespan {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        i18n::I18n,
-        scheduler::timespan::{answer_button_time, time_span, MONTH},
-    };
+    use anki_i18n::I18n;
+
+    use crate::scheduler::timespan::answer_button_time;
+    use crate::scheduler::timespan::time_span;
+    use crate::scheduler::timespan::MONTH;
 
     #[test]
     fn answer_buttons() {

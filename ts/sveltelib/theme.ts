@@ -1,8 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { readable, get } from "svelte/store";
-import { registerPackage } from "../lib/register-package";
+import { registerPackage } from "@tslib/runtime-require";
+import { get, readable } from "svelte/store";
 
 interface ThemeInfo {
     isDark: boolean;
@@ -15,9 +15,9 @@ function getThemeFromRoot(): ThemeInfo {
 }
 
 let setPageTheme: ((theme: ThemeInfo) => void) | null = null;
-/// The current theme that applies to this document/shadow root. When
-/// previewing cards in the card layout screen, this may not match the
-/// theme Anki is using in its UI.
+/** The current theme that applies to this document/shadow root. When
+previewing cards in the card layout screen, this may not match the
+theme Anki is using in its UI. */
 export const pageTheme = readable(getThemeFromRoot(), (set) => {
     setPageTheme = set;
 });

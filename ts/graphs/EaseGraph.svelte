@@ -3,34 +3,31 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import type { Stats } from "../lib/proto";
-    import type { PreferenceStore } from "../sveltelib/preferences";
-
+    import type { GraphsResponse } from "@tslib/anki/stats_pb";
+    import * as tr from "@tslib/ftl";
     import { createEventDispatcher } from "svelte";
-    import * as tr from "../lib/ftl";
 
-    import HistogramGraph from "./HistogramGraph.svelte";
+    import { gatherData, prepareData } from "./ease";
     import Graph from "./Graph.svelte";
+    import type { GraphPrefs } from "./graph-helpers";
+    import type { SearchEventMap, TableDatum } from "./graph-helpers";
+    import type { HistogramData } from "./histogram-graph";
+    import HistogramGraph from "./HistogramGraph.svelte";
     import TableData from "./TableData.svelte";
 
-    import type { HistogramData } from "./histogram-graph";
-    import { gatherData, prepareData } from "./ease";
-    import type { TableDatum, SearchEventMap } from "./graph-helpers";
-
-    export let sourceData: Stats.GraphsResponse | null = null;
-    export let preferences: PreferenceStore<Stats.GraphPreferences>;
+    export let sourceData: GraphsResponse | null = null;
+    export let prefs: GraphPrefs;
 
     const dispatch = createEventDispatcher<SearchEventMap>();
 
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [];
-    let { browserLinksSupported } = preferences;
 
     $: if (sourceData) {
         [histogramData, tableData] = prepareData(
             gatherData(sourceData),
             dispatch,
-            $browserLinksSupported,
+            $prefs.browserLinksSupported,
         );
     }
 
@@ -38,8 +35,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const subtitle = tr.statisticsCardEaseSubtitle();
 </script>
 
-<Graph {title} {subtitle}>
-    <HistogramGraph data={histogramData} />
+{#if !(sourceData?.fsrs ?? false)}
+    <Graph {title} {subtitle}>
+        <HistogramGraph data={histogramData} />
 
-    <TableData {tableData} />
-</Graph>
+        <TableData {tableData} />
+    </Graph>
+{/if}

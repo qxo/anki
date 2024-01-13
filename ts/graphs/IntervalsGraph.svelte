@@ -3,27 +3,27 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import Graph from "./Graph.svelte";
-    import InputBox from "./InputBox.svelte";
-    import HistogramGraph from "./HistogramGraph.svelte";
-    import TableData from "./TableData.svelte";
-
-    import { timeSpan, MONTH } from "../lib/time";
-    import * as tr from "../lib/ftl";
-    import type { Stats } from "../lib/proto";
-    import type { PreferenceStore } from "../sveltelib/preferences";
+    import type { GraphsResponse } from "@tslib/anki/stats_pb";
+    import * as tr from "@tslib/ftl";
+    import { MONTH, timeSpan } from "@tslib/time";
     import { createEventDispatcher } from "svelte";
+
+    import Graph from "./Graph.svelte";
+    import type { GraphPrefs } from "./graph-helpers";
+    import type { SearchEventMap, TableDatum } from "./graph-helpers";
     import type { HistogramData } from "./histogram-graph";
+    import HistogramGraph from "./HistogramGraph.svelte";
+    import InputBox from "./InputBox.svelte";
+    import type { IntervalGraphData } from "./intervals";
     import {
         gatherIntervalData,
         IntervalRange,
         prepareIntervalData,
     } from "./intervals";
-    import type { IntervalGraphData } from "./intervals";
-    import type { TableDatum, SearchEventMap } from "./graph-helpers";
+    import TableData from "./TableData.svelte";
 
-    export let sourceData: Stats.GraphsResponse | null = null;
-    export let preferences: PreferenceStore<Stats.GraphPreferences>;
+    export let sourceData: GraphsResponse | null = null;
+    export let prefs: GraphPrefs;
 
     const dispatch = createEventDispatcher<SearchEventMap>();
 
@@ -31,10 +31,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [];
     let range = IntervalRange.Percentile95;
-    let { browserLinksSupported } = preferences;
 
     $: if (sourceData) {
-        intervalData = gatherIntervalData(sourceData);
+        intervalData = gatherIntervalData(sourceData.intervals!);
     }
 
     $: if (intervalData) {
@@ -42,7 +41,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             intervalData,
             range,
             dispatch,
-            $browserLinksSupported,
+            $prefs.browserLinksSupported,
+            false,
         );
     }
 

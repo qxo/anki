@@ -1,29 +1,41 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{borrow::Cow, cmp::Ordering, hash::Hasher, path::Path, sync::Arc};
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::hash::Hasher;
+use std::path::Path;
+use std::sync::Arc;
 
 use fnv::FnvHasher;
+use fsrs::FSRS;
 use regex::Regex;
-use rusqlite::{functions::FunctionFlags, params, Connection};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::params;
+use rusqlite::Connection;
+use serde_json::Value;
 use unicase::UniCase;
 
-use super::upgrades::{SCHEMA_MAX_VERSION, SCHEMA_MIN_VERSION, SCHEMA_STARTING_VERSION};
-use crate::{
-    config::schema11::schema11_config_as_string,
-    error::{AnkiError, DbErrorKind, Result},
-    i18n::I18n,
-    scheduler::timing::{local_minutes_west_for_stamp, v1_creation_date},
-    text::without_combining,
-    timestamp::TimestampMillis,
-};
+use super::upgrades::SCHEMA_MAX_VERSION;
+use super::upgrades::SCHEMA_MIN_VERSION;
+use super::upgrades::SCHEMA_STARTING_VERSION;
+use super::SchemaVersion;
+use crate::config::schema11::schema11_config_as_string;
+use crate::error::DbErrorKind;
+use crate::prelude::*;
+use crate::scheduler::timing::local_minutes_west_for_stamp;
+use crate::scheduler::timing::v1_creation_date;
+use crate::storage::card::data::CardData;
+use crate::text::without_combining;
 
 fn unicase_compare(s1: &str, s2: &str) -> Ordering {
     UniCase::new(s1).cmp(&UniCase::new(s2))
 }
 
 // fixme: rollback savepoint when tags not changed
-// fixme: need to drop out of wal prior to vacuuming to fix page size of older collections
+// fixme: need to drop out of wal prior to vacuuming to fix page size of older
+// collections
 
 // currently public for dbproxy
 #[derive(Debug)]
@@ -41,24 +53,41 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
 
     db.busy_timeout(std::time::Duration::from_secs(0))?;
 
-    db.pragma_update(None, "locking_mode", &"exclusive")?;
-    db.pragma_update(None, "page_size", &4096)?;
-    db.pragma_update(None, "cache_size", &(-40 * 1024))?;
-    db.pragma_update(None, "legacy_file_format", &false)?;
-    db.pragma_update(None, "journal_mode", &"wal")?;
+    db.pragma_update(None, "locking_mode", "exclusive")?;
+    db.pragma_update(None, "page_size", 4096)?;
+    db.pragma_update(None, "cache_size", -40 * 1024)?;
+    db.pragma_update(None, "legacy_file_format", false)?;
+    db.pragma_update(None, "journal_mode", "wal")?;
+    // Android has no /tmp folder, and fails in the default config.
+    #[cfg(target_os = "android")]
+    db.pragma_update(None, "temp_store", &"memory")?;
 
     db.set_prepared_statement_cache_capacity(50);
 
     add_field_index_function(&db)?;
     add_regexp_function(&db)?;
+    add_regexp_fields_function(&db)?;
+    add_regexp_tags_function(&db)?;
     add_without_combining_function(&db)?;
     add_fnvhash_function(&db)?;
+    add_extract_custom_data_function(&db)?;
+    add_extract_fsrs_variable(&db)?;
+    add_extract_fsrs_retrievability(&db)?;
+    add_extract_fsrs_relative_overdueness(&db)?;
 
     db.create_collation("unicase", unicase_compare)?;
 
     Ok(db)
 }
 
+impl SqliteStorage {
+    /// This is provided as an escape hatch for when you need to do something
+    /// not directly supported by this library. Please exercise caution when
+    /// using it.
+    pub fn db(&self) -> &Connection {
+        &self.db
+    }
+}
 /// Adds sql function field_at_index(flds, index)
 /// to split provided fields and return field at zero-based index.
 /// If out of range, returns empty string.
@@ -130,6 +159,215 @@ fn add_regexp_function(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Adds sql function `regexp_fields(regex, note_flds, indices...) -> is_match`.
+/// If no indices are provided, all fields are matched against.
+fn add_regexp_fields_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "regexp_fields",
+        -1,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert!(ctx.len() > 1, "not enough arguments");
+
+            let re: Arc<Regex> = ctx
+                .get_or_create_aux(0, |vr| -> std::result::Result<_, BoxError> {
+                    Ok(Regex::new(vr.as_str()?)?)
+                })?;
+            let fields = ctx.get_raw(1).as_str()?.split('\x1f');
+            let indices: HashSet<usize> = (2..ctx.len())
+                .map(|i| ctx.get(i))
+                .collect::<rusqlite::Result<_>>()?;
+
+            Ok(fields.enumerate().any(|(idx, field)| {
+                (indices.is_empty() || indices.contains(&idx)) && re.is_match(field)
+            }))
+        },
+    )
+}
+
+/// Adds sql function `regexp_tags(regex, tags) -> is_match`.
+fn add_regexp_tags_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "regexp_tags",
+        2,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+
+            let re: Arc<Regex> = ctx
+                .get_or_create_aux(0, |vr| -> std::result::Result<_, BoxError> {
+                    Ok(Regex::new(vr.as_str()?)?)
+                })?;
+            let mut tags = ctx.get_raw(1).as_str()?.split(' ');
+
+            Ok(tags.any(|tag| re.is_match(tag)))
+        },
+    )
+}
+
+/// eg. extract_custom_data(card.data, 'r') -> string | null
+fn add_extract_custom_data_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_custom_data",
+        2,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+
+            let Ok(card_data) = ctx.get_raw(0).as_str() else {
+                return Ok(None);
+            };
+            if card_data.is_empty() {
+                return Ok(None);
+            }
+            let Ok(key) = ctx.get_raw(1).as_str() else {
+                return Ok(None);
+            };
+            let custom_data = &CardData::from_str(card_data).custom_data;
+            let Ok(value) = serde_json::from_str::<Value>(custom_data) else {
+                return Ok(None);
+            };
+            let v = value.get(key).map(|v| match v {
+                Value::String(s) => s.to_owned(),
+                _ => v.to_string(),
+            });
+            Ok(v)
+        },
+    )
+}
+
+/// eg. extract_fsrs_variable(card.data, 's' | 'd' | 'dr') -> float | null
+fn add_extract_fsrs_variable(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_fsrs_variable",
+        2,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+
+            let Ok(card_data) = ctx.get_raw(0).as_str() else {
+                return Ok(None);
+            };
+            if card_data.is_empty() {
+                return Ok(None);
+            }
+            let Ok(key) = ctx.get_raw(1).as_str() else {
+                return Ok(None);
+            };
+            let card_data = &CardData::from_str(card_data);
+            Ok(match key {
+                "s" => card_data.fsrs_stability,
+                "d" => card_data.fsrs_difficulty,
+                "dr" => card_data.fsrs_desired_retention,
+                _ => panic!("invalid key: {key}"),
+            })
+        },
+    )
+}
+
+/// eg. extract_fsrs_retrievability(card.data, card.due, card.ivl,
+/// timing.days_elapsed, timing.next_day_at) -> float | null
+fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_fsrs_retrievability",
+        5,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 5, "called with unexpected number of arguments");
+            let Ok(card_data) = ctx.get_raw(0).as_str() else {
+                return Ok(None);
+            };
+            if card_data.is_empty() {
+                return Ok(None);
+            }
+            let card_data = &CardData::from_str(card_data);
+            let Ok(due) = ctx.get_raw(1).as_i64() else {
+                return Ok(None);
+            };
+            let days_elapsed = if due > 365_000 {
+                // (re)learning card in seconds
+                let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
+                    return Ok(None);
+                };
+                (next_day_at as u32).saturating_sub(due.max(0) as u32) / 86_400
+            } else {
+                let Ok(ivl) = ctx.get_raw(2).as_i64() else {
+                    return Ok(None);
+                };
+                let Ok(days_elapsed) = ctx.get_raw(3).as_i64() else {
+                    return Ok(None);
+                };
+                let review_day = (due.max(0) as u32).saturating_sub(ivl as u32);
+                (days_elapsed.max(0) as u32).saturating_sub(review_day)
+            };
+            Ok(card_data.memory_state().map(|state| {
+                FSRS::new(None)
+                    .unwrap()
+                    .current_retrievability(state.into(), days_elapsed)
+            }))
+        },
+    )
+}
+
+/// eg. extract_fsrs_relative_overdueness(card.data, card.due,
+/// timing.days_elapsed, card.ivl, timing.next_day_at) -> float | null. The
+/// higher the number, the more overdue.
+fn add_extract_fsrs_relative_overdueness(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_fsrs_relative_overdueness",
+        5,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 5, "called with unexpected number of arguments");
+
+            let Ok(card_data) = ctx.get_raw(0).as_str() else {
+                return Ok(None);
+            };
+            if card_data.is_empty() {
+                return Ok(None);
+            }
+            let card_data = &CardData::from_str(card_data);
+            let Ok(due) = ctx.get_raw(1).as_i64() else {
+                return Ok(None);
+            };
+            let days_elapsed = if due > 365_000 {
+                // (re)learning
+                let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
+                    return Ok(None);
+                };
+                (next_day_at as u32).saturating_sub(due.max(0) as u32) / 86_400
+            } else {
+                let Ok(days_elapsed) = ctx.get_raw(2).as_i64() else {
+                    return Ok(None);
+                };
+                let Ok(interval) = ctx.get_raw(3).as_i64() else {
+                    return Ok(None);
+                };
+                let review_day = due.saturating_sub(interval);
+
+                days_elapsed.saturating_sub(review_day) as u32
+            };
+            let Some(state) = card_data.memory_state() else {
+                return Ok(None);
+            };
+            let Some(mut desired_retrievability) = card_data.fsrs_desired_retention else {
+                return Ok(None);
+            };
+            // avoid div by zero
+            desired_retrievability = desired_retrievability.max(0.0001);
+
+            let current_retrievability = FSRS::new(None)
+                .unwrap()
+                .current_retrievability(state.into(), days_elapsed)
+                .max(0.0001);
+
+            Ok(Some(
+                (1. / current_retrievability - 1.) / (1. / desired_retrievability - 1.),
+            ))
+        },
+    )
+}
+
 /// Fetch schema version from database.
 /// Return (must_create, version)
 fn schema_version(db: &Connection) -> Result<(bool, u8)> {
@@ -151,7 +389,12 @@ fn trace(s: &str) {
 }
 
 impl SqliteStorage {
-    pub(crate) fn open_or_create(path: &Path, tr: &I18n, server: bool) -> Result<Self> {
+    pub(crate) fn open_or_create(
+        path: &Path,
+        tr: &I18n,
+        server: bool,
+        check_integrity: bool,
+    ) -> Result<Self> {
         let db = open_or_create_collection_db(path)?;
         let (create, ver) = schema_version(&db)?;
 
@@ -169,6 +412,13 @@ impl SqliteStorage {
             return Err(AnkiError::db_error("", kind));
         }
 
+        if check_integrity {
+            match db.pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0)) {
+                Ok(s) => require!(s == "ok", "corrupt: {s}"),
+                Err(e) => return Err(e.into()),
+            };
+        }
+
         let upgrade = ver != SCHEMA_MAX_VERSION;
         if create || upgrade {
             db.execute("begin exclusive", [])?;
@@ -177,11 +427,11 @@ impl SqliteStorage {
         if create {
             db.execute_batch(include_str!("schema11.sql"))?;
             // start at schema 11, then upgrade below
-            let crt = v1_creation_date();
+            let crt = TimestampSecs(v1_creation_date());
             let offset = if server {
                 None
             } else {
-                Some(local_minutes_west_for_stamp(crt))
+                Some(local_minutes_west_for_stamp(crt)?)
             };
             db.execute(
                 "update col set crt=?, scm=?, ver=?, conf=?",
@@ -213,12 +463,37 @@ impl SqliteStorage {
         Ok(storage)
     }
 
-    pub(crate) fn close(self, downgrade: bool) -> Result<()> {
-        if downgrade {
-            self.downgrade_to_schema_11()?;
-            self.db.pragma_update(None, "journal_mode", &"delete")?;
+    pub(crate) fn close(self, desired_version: Option<SchemaVersion>) -> Result<()> {
+        if let Some(version) = desired_version {
+            self.downgrade_to(version)?;
+            if version.has_journal_mode_delete() {
+                self.db.pragma_update(None, "journal_mode", "delete")?;
+            }
         }
         Ok(())
+    }
+
+    /// Flush data from WAL file into DB, so the DB is safe to copy. Caller must
+    /// not call this while there is an active transaction.
+    pub(crate) fn checkpoint(&self) -> Result<()> {
+        if !self.db.is_autocommit() {
+            return Err(AnkiError::db_error(
+                "active transaction",
+                DbErrorKind::Other,
+            ));
+        }
+        self.db
+            .query_row_and_then("pragma wal_checkpoint(truncate)", [], |row| {
+                let error_code: i64 = row.get(0)?;
+                if error_code != 0 {
+                    Err(AnkiError::db_error(
+                        "unable to checkpoint",
+                        DbErrorKind::Other,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
     }
 
     // Standard transaction start/stop

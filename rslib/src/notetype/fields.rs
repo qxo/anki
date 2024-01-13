@@ -1,11 +1,9 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{NoteFieldConfig, NoteFieldProto};
-use crate::{
-    backend_proto::UInt32,
-    error::{AnkiError, Result},
-};
+use super::NoteFieldConfig;
+use super::NoteFieldProto;
+use crate::prelude::*;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NoteField {
@@ -17,7 +15,7 @@ pub struct NoteField {
 impl From<NoteField> for NoteFieldProto {
     fn from(f: NoteField) -> Self {
         NoteFieldProto {
-            ord: f.ord.map(|n| UInt32 { val: n }),
+            ord: f.ord.map(Into::into),
             name: f.name,
             config: Some(f.config),
         }
@@ -40,11 +38,17 @@ impl NoteField {
             ord: None,
             name: name.into(),
             config: NoteFieldConfig {
+                id: Some(rand::random()),
                 sticky: false,
                 rtl: false,
+                plain_text: false,
                 font_name: "Arial".into(),
                 font_size: 20,
                 description: "".into(),
+                collapsed: false,
+                exclude_from_search: false,
+                tag: None,
+                prevent_deletion: false,
                 other: vec![],
             },
         }
@@ -52,9 +56,7 @@ impl NoteField {
 
     /// Fix the name of the field if it's valid. Otherwise explain why it's not.
     pub(crate) fn fix_name(&mut self) -> Result<()> {
-        if self.name.is_empty() {
-            return Err(AnkiError::invalid_input("Empty field name"));
-        }
+        require!(!self.name.is_empty(), "Empty field name");
         let bad_chars = |c| c == ':' || c == '{' || c == '}' || c == '"';
         if self.name.contains(bad_chars) {
             self.name = self.name.replace(bad_chars, "");
@@ -62,11 +64,7 @@ impl NoteField {
         // and leading/trailing whitespace and special chars
         let bad_start_chars = |c: char| c == '#' || c == '/' || c == '^' || c.is_whitespace();
         let trimmed = self.name.trim().trim_start_matches(bad_start_chars);
-        if trimmed.is_empty() {
-            return Err(AnkiError::invalid_input(
-                "Field name: ".to_owned() + &self.name,
-            ));
-        }
+        require!(!trimmed.is_empty(), "Field name: {}", self.name);
         if trimmed.len() != self.name.len() {
             self.name = trimmed.into();
         }

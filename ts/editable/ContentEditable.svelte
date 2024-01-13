@@ -8,16 +8,17 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <script lang="ts">
     import type { Writable } from "svelte/store";
+
     import { updateAllState } from "../components/WithState.svelte";
     import actionList from "../sveltelib/action-list";
-    import contentEditableAPI, {
-        saveLocation,
-        initialFocusHandling,
-        preventBuiltinContentEditableShortcuts,
-    } from "./content-editable";
+    import type { MirrorAction } from "../sveltelib/dom-mirror";
+    import type { SetupInputHandlerAction } from "../sveltelib/input-handler";
     import type { ContentEditableAPI } from "./content-editable";
-    import type { MirrorAction } from "../sveltelib/mirror-dom";
-    import type { InputManagerAction } from "../sveltelib/input-manager";
+    import {
+        fixRTLKeyboardNav,
+        preventBuiltinShortcuts,
+        useFocusHandler,
+    } from "./content-editable";
 
     export let resolve: (editable: HTMLElement) => void;
 
@@ -27,23 +28,27 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const mirrorAction = actionList(mirrors);
     const mirrorOptions = { store: nodes };
 
-    export let managers: InputManagerAction[];
+    export let inputHandlers: SetupInputHandlerAction[];
 
-    const managerAction = actionList(managers);
+    const inputHandlerAction = actionList(inputHandlers);
 
     export let api: Partial<ContentEditableAPI>;
 
-    Object.assign(api, contentEditableAPI);
+    const [focusHandler, setupFocusHandling] = useFocusHandler();
+
+    Object.assign(api, { focusHandler });
 </script>
 
 <anki-editable
     contenteditable="true"
+    role="textbox"
+    tabindex="0"
     use:resolve
-    use:saveLocation
-    use:initialFocusHandling
-    use:preventBuiltinContentEditableShortcuts
+    use:setupFocusHandling
+    use:preventBuiltinShortcuts
+    use:fixRTLKeyboardNav
     use:mirrorAction={mirrorOptions}
-    use:managerAction={{}}
+    use:inputHandlerAction={{}}
     on:focus
     on:blur
     on:click={updateAllState}
@@ -53,9 +58,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <style lang="scss">
     anki-editable {
         display: block;
-        padding: 6px;
+        position: relative;
+
         overflow: auto;
-        overflow-wrap: break-word;
+        overflow-wrap: anywhere;
+        /* fallback for iOS */
+        word-break: break-word;
 
         &:focus {
             outline: none;

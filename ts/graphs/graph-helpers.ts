@@ -5,8 +5,10 @@
 @typescript-eslint/no-explicit-any: "off",
 @typescript-eslint/ban-ts-comment: "off" */
 
-import type { Stats, Cards } from "../lib/proto";
-import type { Selection } from "d3";
+import type { GraphPreferences } from "@tslib/anki/stats_pb";
+import type { Bin, Selection } from "d3";
+import { sum } from "d3";
+import type { PreferenceStore } from "sveltelib/preferences";
 
 // amount of data to fetch from backend
 export enum RevlogRange {
@@ -24,13 +26,6 @@ export enum GraphRange {
     ThreeMonths = 1,
     Year = 2,
     AllTime = 3,
-}
-
-export interface GraphsContext {
-    cards: Cards.Card[];
-    revlog: Stats.RevlogEntry[];
-    revlogRange: RevlogRange;
-    nightMode: boolean;
 }
 
 export interface GraphBounds {
@@ -53,6 +48,8 @@ export function defaultGraphBounds(): GraphBounds {
     };
 }
 
+export type GraphPrefs = PreferenceStore<GraphPreferences>;
+
 export function setDataAvailable(
     svg: Selection<SVGElement, any, any, any>,
     available: boolean,
@@ -68,7 +65,7 @@ export function millisecondCutoffForRange(
     range: GraphRange,
     nextDayAtSecs: number,
 ): number {
-    let days;
+    let days: number;
     switch (range) {
         case GraphRange.Month:
             days = 31;
@@ -97,3 +94,13 @@ export type SearchDispatch = <EventKey extends Extract<keyof SearchEventMap, str
     type: EventKey,
     detail: SearchEventMap[EventKey],
 ) => void;
+
+/** Convert a protobuf map that protobufjs represents as an object with string
+keys into a Map with numeric keys. */
+export function numericMap<T>(obj: { [k: string]: T }): Map<number, T> {
+    return new Map(Object.entries(obj).map(([k, v]) => [Number(k), v]));
+}
+
+export function getNumericMapBinValue(d: Bin<Map<number, number>, number>): number {
+    return sum(d, (d) => d[1]);
+}

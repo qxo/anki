@@ -3,6 +3,8 @@
 
 syntax = "proto3";
 
+option java_multiple_files = true;
+
 package anki.config;
 
 import "anki/generic.proto";
@@ -22,6 +24,10 @@ service ConfigService {
   rpc SetPreferences(Preferences) returns (collection.OpChanges);
 }
 
+// Implicitly includes any of the above methods that are not listed in the
+// backend service.
+service BackendConfigService {}
+
 message ConfigKey {
   enum Bool {
     BROWSER_TABLE_SHOW_NOTES_MODE = 0;
@@ -40,6 +46,13 @@ message ConfigKey {
     PASTE_IMAGES_AS_PNG = 15;
     PASTE_STRIPS_FORMATTING = 16;
     NORMALIZE_NOTE_TEXT = 17;
+    IGNORE_ACCENTS_IN_SEARCH = 18;
+    RESTORE_POSITION_BROWSER = 19;
+    RESTORE_POSITION_REVIEWER = 20;
+    RESET_COUNTS_BROWSER = 21;
+    RESET_COUNTS_REVIEWER = 22;
+    RANDOM_ORDER_REPOSITION = 23;
+    SHIFT_POSITION_OF_EXISTING_CARDS = 24;
   }
   enum String {
     SET_DUE_BROWSER = 0;
@@ -87,9 +100,6 @@ message Preferences {
       NEW_FIRST = 2;
     }
 
-    // read only; 1-3
-    uint32 scheduler_version = 1;
-
     uint32 rollover = 2;
     uint32 learn_ahead_secs = 3;
     NewReviewMix new_review_mix = 4;
@@ -110,9 +120,17 @@ message Preferences {
     bool paste_images_as_png = 2;
     bool paste_strips_formatting = 3;
     string default_search_text = 4;
+    bool ignore_accents_in_search = 5;
+  }
+  message BackupLimits {
+    uint32 daily = 1;
+    uint32 weekly = 2;
+    uint32 monthly = 3;
+    uint32 minimum_interval_mins = 4;
   }
 
   Scheduling scheduling = 1;
   Reviewing reviewing = 2;
   Editing editing = 3;
+  BackupLimits backups = 4;
 }

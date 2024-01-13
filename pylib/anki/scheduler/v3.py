@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from typing import Literal, Optional, Sequence
 
-from anki import scheduler_pb2
+from anki import frontend_pb2, scheduler_pb2
+from anki._legacy import deprecated
 from anki.cards import Card
 from anki.collection import OpChanges
 from anki.consts import *
@@ -28,7 +29,10 @@ from anki.utils import int_time
 
 QueuedCards = scheduler_pb2.QueuedCards
 SchedulingState = scheduler_pb2.SchedulingState
-NextStates = scheduler_pb2.NextCardStates
+SchedulingStates = scheduler_pb2.SchedulingStates
+SchedulingContext = scheduler_pb2.SchedulingContext
+SchedulingStatesWithContext = frontend_pb2.SchedulingStatesWithContext
+SetSchedulingStatesRequest = frontend_pb2.SetSchedulingStatesRequest
 CardAnswer = scheduler_pb2.CardAnswer
 
 
@@ -52,7 +56,7 @@ class Scheduler(SchedulerBaseWithLegacy):
             fetch_limit=fetch_limit, intraday_learning_only=intraday_learning_only
         )
 
-    def describe_next_states(self, next_states: NextStates) -> Sequence[str]:
+    def describe_next_states(self, next_states: SchedulingStates) -> Sequence[str]:
         "Labels for each of the answer buttons."
         return self.col._backend.describe_next_states(next_states)
 
@@ -60,7 +64,11 @@ class Scheduler(SchedulerBaseWithLegacy):
     ##########################################################################
 
     def build_answer(
-        self, *, card: Card, states: NextStates, rating: CardAnswer.Rating.V
+        self,
+        *,
+        card: Card,
+        states: SchedulingStates,
+        rating: CardAnswer.Rating.V,
     ) -> CardAnswer:
         "Build input for answer_card()."
         if rating == CardAnswer.AGAIN:
@@ -80,13 +88,14 @@ class Scheduler(SchedulerBaseWithLegacy):
             new_state=new_state,
             rating=rating,
             answered_at_millis=int_time(1000),
-            milliseconds_taken=card.time_taken(),
+            milliseconds_taken=card.time_taken(capped=False),
         )
 
     def answer_card(self, input: CardAnswer) -> OpChanges:
         "Update card to provided state, and remove it from queue."
         self.reps += 1
-        return self.col._backend.answer_card(input=input)
+        op_bytes = self.col._backend.answer_card_raw(input.SerializeToString())
+        return OpChanges.FromString(op_bytes)
 
     def state_is_leech(self, new_state: SchedulingState) -> bool:
         "True if new state marks the card as a leech."
@@ -95,6 +104,7 @@ class Scheduler(SchedulerBaseWithLegacy):
     # Fetching the next card (legacy API)
     ##########################################################################
 
+    @deprecated(info="no longer required")
     def reset(self) -> None:
         # backend automatically resets queues as operations are performed
         pass
@@ -131,17 +141,9 @@ class Scheduler(SchedulerBaseWithLegacy):
     def reviewCount(self) -> int:
         return self.counts()[2]
 
-    def countIdx(self, card: Card) -> int:
-        if card.queue in (QUEUE_TYPE_DAY_LEARN_RELEARN, QUEUE_TYPE_PREVIEW):
-            return QUEUE_TYPE_LRN
-        return card.queue
-
-    def answerButtons(self, card: Card) -> int:
-        return 4
-
     def nextIvlStr(self, card: Card, ease: int, short: bool = False) -> str:
         "Return the next interval for CARD as a string."
-        states = self.col._backend.get_next_card_states(card.id)
+        states = self.col._backend.get_scheduling_states(card.id)
         return self.col._backend.describe_next_states(states)[ease - 1]
 
     # Answering a card (legacy API)
@@ -159,7 +161,7 @@ class Scheduler(SchedulerBaseWithLegacy):
         else:
             raise Exception("invalid ease")
 
-        states = self.col._backend.get_next_card_states(card.id)
+        states = self.col._backend.get_scheduling_states(card.id)
         changes = self.answer_card(
             self.build_answer(card=card, states=states, rating=rating)
         )
@@ -174,7 +176,7 @@ class Scheduler(SchedulerBaseWithLegacy):
     # fixme: move these into tests_schedv2 in the future
 
     def _interval_for_state(self, state: scheduler_pb2.SchedulingState) -> int:
-        kind = state.WhichOneof("value")
+        kind = state.WhichOneof("kind")
         if kind == "normal":
             return self._interval_for_normal_state(state.normal)
         elif kind == "filtered":
@@ -186,7 +188,7 @@ class Scheduler(SchedulerBaseWithLegacy):
     def _interval_for_normal_state(
         self, normal: scheduler_pb2.SchedulingState.Normal
     ) -> int:
-        kind = normal.WhichOneof("value")
+        kind = normal.WhichOneof("kind")
         if kind == "new":
             return 0
         elif kind == "review":
@@ -202,7 +204,7 @@ class Scheduler(SchedulerBaseWithLegacy):
     def _interval_for_filtered_state(
         self, filtered: scheduler_pb2.SchedulingState.Filtered
     ) -> int:
-        kind = filtered.WhichOneof("value")
+        kind = filtered.WhichOneof("kind")
         if kind == "preview":
             return filtered.preview.scheduled_secs
         elif kind == "rescheduling":
@@ -213,7 +215,7 @@ class Scheduler(SchedulerBaseWithLegacy):
 
     def nextIvl(self, card: Card, ease: int) -> Any:
         "Don't use this - it is only required by tests, and will be moved in the future."
-        states = self.col._backend.get_next_card_states(card.id)
+        states = self.col._backend.get_scheduling_states(card.id)
         if ease == BUTTON_ONE:
             new_state = states.again
         elif ease == BUTTON_TWO:
@@ -237,11 +239,3 @@ class Scheduler(SchedulerBaseWithLegacy):
             return self.col.db.list("select id from active_decks")
         except DBError:
             return []
-
-    # used by custom study; will likely be rolled into a separate routine
-    # in the future
-    def totalNewForCurrentDeck(self) -> int:
-        return self.col.db.scalar(
-            f"""
-select count() from cards where queue={QUEUE_TYPE_NEW} and did in (select id from active_decks)"""
-        )

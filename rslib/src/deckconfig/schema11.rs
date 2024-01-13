@@ -3,17 +3,30 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize as DeTrait, Deserializer};
+use phf::phf_set;
+use phf::Set;
+use serde::Deserialize as DeTrait;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 use serde_aux::field_attributes::deserialize_number_from_string;
-use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_repr::Deserialize_repr;
+use serde_repr::Serialize_repr;
 use serde_tuple::Serialize_tuple;
 
-use super::{
-    DeckConfig, DeckConfigId, DeckConfigInner, NewCardInsertOrder, INITIAL_EASE_FACTOR_THOUSANDS,
-};
-use crate::{serde::default_on_invalid, timestamp::TimestampSecs, types::Usn};
+use super::DeckConfig;
+use super::DeckConfigId;
+use super::DeckConfigInner;
+use super::NewCardInsertOrder;
+use super::INITIAL_EASE_FACTOR_THOUSANDS;
+use crate::serde::default_on_invalid;
+use crate::timestamp::TimestampSecs;
+use crate::types::Usn;
+
+fn wait_for_audio_default() -> bool {
+    true
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +54,6 @@ pub struct DeckConfSchema11 {
 
     // 2021 scheduler options: these were not in schema 11, but we need to persist them
     // so the settings are not lost on upgrade/downgrade.
-    // NOTE: if adding new ones, make sure to update clear_other_duplicates()
     #[serde(default)]
     new_mix: i32,
     #[serde(default)]
@@ -54,9 +66,42 @@ pub struct DeckConfSchema11 {
     new_sort_order: i32,
     #[serde(default)]
     new_gather_priority: i32,
+    #[serde(default)]
+    bury_interday_learning: bool,
+
+    #[serde(default)]
+    fsrs_weights: Vec<f32>,
+    #[serde(default)]
+    desired_retention: f32,
+    #[serde(default)]
+    stop_timer_on_answer: bool,
+    #[serde(default)]
+    seconds_to_show_question: f32,
+    #[serde(default)]
+    seconds_to_show_answer: f32,
+    #[serde(default)]
+    answer_action: AnswerAction,
+    #[serde(default = "wait_for_audio_default")]
+    wait_for_audio: bool,
+    #[serde(default)]
+    sm2_retention: f32,
+    #[serde(default)]
+    weight_search: String,
 
     #[serde(flatten)]
     other: HashMap<String, Value>,
+}
+
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone)]
+#[repr(u8)]
+#[derive(Default)]
+pub enum AnswerAction {
+    #[default]
+    BuryCard = 0,
+    AnswerAgain = 1,
+    AnswerGood = 2,
+    AnswerHard = 3,
+    ShowReminder = 4,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -78,7 +123,7 @@ pub struct NewConfSchema11 {
     other: HashMap<String, Value>,
 }
 
-#[derive(Serialize_tuple, Debug, PartialEq, Clone)]
+#[derive(Serialize_tuple, Debug, PartialEq, Eq, Clone)]
 pub struct NewCardIntervals {
     good: u16,
     easy: u16,
@@ -118,7 +163,7 @@ where
         .unwrap_or_default())
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Clone)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone)]
 #[repr(u8)]
 pub enum NewCardOrderSchema11 {
     Random = 0,
@@ -152,10 +197,12 @@ pub struct RevConfSchema11 {
     other: HashMap<String, Value>,
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Clone)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum LeechAction {
     Suspend = 0,
+    #[default]
     TagOnly = 1,
 }
 
@@ -172,12 +219,6 @@ pub struct LapseConfSchema11 {
 
     #[serde(flatten)]
     other: HashMap<String, Value>,
-}
-
-impl Default for LeechAction {
-    fn default() -> Self {
-        LeechAction::TagOnly
-    }
 }
 
 impl Default for RevConfSchema11 {
@@ -231,6 +272,11 @@ impl Default for DeckConfSchema11 {
             max_taken: 60,
             autoplay: true,
             timer: 0,
+            stop_timer_on_answer: false,
+            seconds_to_show_question: 0.0,
+            seconds_to_show_answer: 0.0,
+            answer_action: AnswerAction::BuryCard,
+            wait_for_audio: true,
             replayq: true,
             dynamic: false,
             new: Default::default(),
@@ -243,6 +289,11 @@ impl Default for DeckConfSchema11 {
             review_order: 0,
             new_sort_order: 0,
             new_gather_priority: 0,
+            bury_interday_learning: false,
+            fsrs_weights: vec![],
+            desired_retention: 0.9,
+            sm2_retention: 0.9,
+            weight_search: "".to_string(),
         }
     }
 }
@@ -307,9 +358,19 @@ impl From<DeckConfSchema11> for DeckConfig {
                 disable_autoplay: !c.autoplay,
                 cap_answer_time_to_secs: c.max_taken.max(0) as u32,
                 show_timer: c.timer != 0,
+                stop_timer_on_answer: c.stop_timer_on_answer,
+                seconds_to_show_question: c.seconds_to_show_question,
+                seconds_to_show_answer: c.seconds_to_show_answer,
+                answer_action: c.answer_action as i32,
+                wait_for_audio: c.wait_for_audio,
                 skip_question_when_replaying_answer: !c.replayq,
                 bury_new: c.new.bury,
                 bury_reviews: c.rev.bury,
+                bury_interday_learning: c.bury_interday_learning,
+                fsrs_weights: c.fsrs_weights,
+                desired_retention: c.desired_retention,
+                sm2_retention: c.sm2_retention,
+                weight_search: c.weight_search,
                 other: other_bytes,
             },
         }
@@ -328,19 +389,22 @@ impl From<DeckConfig> for DeckConfSchema11 {
             top_other = Default::default();
         } else {
             top_other = serde_json::from_slice(&c.inner.other).unwrap_or_default();
-            clear_other_duplicates(&mut top_other);
             if let Some(new) = top_other.remove("new") {
                 let val: HashMap<String, Value> = serde_json::from_value(new).unwrap_or_default();
                 new_other = val;
+                new_other.retain(|k, _v| !RESERVED_DECKCONF_NEW_KEYS.contains(k))
             }
             if let Some(rev) = top_other.remove("rev") {
                 let val: HashMap<String, Value> = serde_json::from_value(rev).unwrap_or_default();
                 rev_other = val;
+                rev_other.retain(|k, _v| !RESERVED_DECKCONF_REV_KEYS.contains(k))
             }
             if let Some(lapse) = top_other.remove("lapse") {
                 let val: HashMap<String, Value> = serde_json::from_value(lapse).unwrap_or_default();
                 lapse_other = val;
+                lapse_other.retain(|k, _v| !RESERVED_DECKCONF_LAPSE_KEYS.contains(k))
             }
+            top_other.retain(|k, _v| !RESERVED_DECKCONF_KEYS.contains(k));
         }
         let i = c.inner;
         let new_order = i.new_card_insert_order();
@@ -351,7 +415,18 @@ impl From<DeckConfig> for DeckConfSchema11 {
             usn: c.usn,
             max_taken: i.cap_answer_time_to_secs as i32,
             autoplay: !i.disable_autoplay,
-            timer: if i.show_timer { 1 } else { 0 },
+            timer: i.show_timer.into(),
+            stop_timer_on_answer: i.stop_timer_on_answer,
+            seconds_to_show_question: i.seconds_to_show_question,
+            seconds_to_show_answer: i.seconds_to_show_answer,
+            answer_action: match i.answer_action {
+                0 => AnswerAction::BuryCard,
+                1 => AnswerAction::AnswerAgain,
+                3 => AnswerAction::AnswerHard,
+                4 => AnswerAction::ShowReminder,
+                _ => AnswerAction::AnswerGood,
+            },
+            wait_for_audio: i.wait_for_audio,
             replayq: !i.skip_question_when_replaying_answer,
             dynamic: false,
             new: NewConfSchema11 {
@@ -397,36 +472,80 @@ impl From<DeckConfig> for DeckConfSchema11 {
             review_order: i.review_order,
             new_sort_order: i.new_card_sort_order,
             new_gather_priority: i.new_card_gather_priority,
+            bury_interday_learning: i.bury_interday_learning,
+            fsrs_weights: i.fsrs_weights,
+            desired_retention: i.desired_retention,
+            sm2_retention: i.sm2_retention,
+            weight_search: i.weight_search,
         }
     }
 }
 
-fn clear_other_duplicates(top_other: &mut HashMap<String, Value>) {
-    // Older clients may have received keys from a newer client when
-    // syncing, which get bundled into `other`. If they then upgrade, then
-    // downgrade their collection to schema11, serde will serialize the
-    // new default keys, but then add them again from `other`, leading
-    // to the keys being duplicated in the resulting json - which older
-    // clients then can't read. So we need to strip out any new keys we
-    // add.
-    for key in &[
-        "newMix",
-        "newPerDayMinimum",
-        "interdayLearningMix",
-        "reviewOrder",
-        "newSortOrder",
-        "newGatherPriority",
-    ] {
-        top_other.remove(*key);
-    }
-}
+static RESERVED_DECKCONF_KEYS: Set<&'static str> = phf_set! {
+    "id",
+    "newSortOrder",
+    "replayq",
+    "newPerDayMinimum",
+    "usn",
+    "autoplay",
+    "dyn",
+    "maxTaken",
+    "reviewOrder",
+    "buryInterdayLearning",
+    "newMix",
+    "mod",
+    "timer",
+    "name",
+    "interdayLearningMix",
+    "newGatherPriority",
+    "fsrsWeights",
+    "desiredRetention",
+    "stopTimerOnAnswer",
+    "secondsToShowQuestion",
+    "secondsToShowAnswer",
+    "answerAction",
+    "waitForAudio",
+    "sm2Retention",
+    "weightSearch",
+};
+
+static RESERVED_DECKCONF_NEW_KEYS: Set<&'static str> = phf_set! {
+    "order", "delays", "bury", "perDay", "initialFactor", "ints"
+};
+
+static RESERVED_DECKCONF_REV_KEYS: Set<&'static str> = phf_set! {
+    "maxIvl", "hardFactor", "ease4", "ivlFct", "perDay", "bury"
+};
+
+static RESERVED_DECKCONF_LAPSE_KEYS: Set<&'static str> = phf_set! {
+    "leechFails", "mult", "leechAction", "delays", "minInt"
+};
 
 #[cfg(test)]
 mod test {
+    use itertools::Itertools;
     use serde::de::IntoDeserializer;
-    use serde_json::{json, Value};
+    use serde_json::json;
+    use serde_json::Value;
 
     use super::*;
+    use crate::prelude::*;
+
+    #[test]
+    fn all_reserved_fields_are_removed() -> Result<()> {
+        let key_source = DeckConfSchema11::default();
+        let mut config = DeckConfig::default();
+        let empty: &[&String] = &[];
+
+        config.inner.other = serde_json::to_vec(&key_source)?;
+        let s11 = DeckConfSchema11::from(config);
+        assert_eq!(&s11.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.new.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.rev.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.lapse.other.keys().collect_vec(), empty);
+
+        Ok(())
+    }
 
     #[test]
     fn new_intervals() {

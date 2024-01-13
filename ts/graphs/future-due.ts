@@ -5,74 +5,25 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import type { Stats, Cards } from "../lib/proto";
-import {
-    extent,
-    histogram,
-    rollup,
-    sum,
-    scaleLinear,
-    scaleSequential,
-    interpolateGreens,
-} from "d3";
+import type { GraphsResponse } from "@tslib/anki/stats_pb";
+import * as tr from "@tslib/ftl";
+import { localizedNumber } from "@tslib/i18n";
+import { dayLabel } from "@tslib/time";
 import type { Bin } from "d3";
-import { localizedNumber } from "../lib/i18n";
-import * as tr from "../lib/ftl";
-import { CardQueue } from "../lib/cards";
-import type { HistogramData } from "./histogram-graph";
-import { dayLabel } from "../lib/time";
+import { bin, extent, interpolateGreens, scaleLinear, scaleSequential, sum } from "d3";
 
-import { GraphRange } from "./graph-helpers";
-import type { TableDatum, SearchDispatch } from "./graph-helpers";
+import type { SearchDispatch, TableDatum } from "./graph-helpers";
+import { getNumericMapBinValue, GraphRange, numericMap } from "./graph-helpers";
+import type { HistogramData } from "./histogram-graph";
 
 export interface GraphData {
     dueCounts: Map<number, number>;
     haveBacklog: boolean;
 }
 
-export function gatherData(data: Stats.GraphsResponse): GraphData {
-    const isLearning = (card: Cards.Card): boolean =>
-        [CardQueue.Learn, CardQueue.PreviewRepeat].includes(card.queue);
-
-    let haveBacklog = false;
-    const due = (data.cards as Cards.Card[])
-        .filter((c: Cards.Card) => {
-            // reviews
-            return (
-                [CardQueue.Review, CardQueue.DayLearn].includes(c.queue) ||
-                // or learning cards
-                isLearning(c)
-            );
-        })
-        .map((c: Cards.Card) => {
-            let dueDay: number;
-
-            if (isLearning(c)) {
-                const offset = c.due - data.nextDayAtSecs;
-                dueDay = Math.floor(offset / 86_400) + 1;
-            } else {
-                // - testing just odue fails on day 1
-                // - testing just odid fails on lapsed cards that
-                //   have due calculated at regraduation time
-                const due = c.originalDeckId && c.originalDue ? c.originalDue : c.due;
-                dueDay = due - data.daysElapsed;
-            }
-
-            haveBacklog = haveBacklog || dueDay < 0;
-
-            return dueDay;
-        });
-
-    const dueCounts = rollup(
-        due,
-        (v) => v.length,
-        (d) => d,
-    );
-    return { dueCounts, haveBacklog };
-}
-
-function binValue(d: Bin<Map<number, number>, number>): number {
-    return sum(d, (d) => d[1]);
+export function gatherData(data: GraphsResponse): GraphData {
+    const msg = data.futureDue!;
+    return { dueCounts: numericMap(msg.futureDue), haveBacklog: msg.haveBacklog };
 }
 
 export interface FutureDueResponse {
@@ -129,7 +80,7 @@ export function buildHistogram(
     const desiredBars = Math.min(70, xMax! - xMin!);
 
     const x = scaleLinear().domain([xMin!, xMax!]);
-    const bins = histogram()
+    const bins = bin()
         .value((m) => {
             return m[0];
         })
@@ -143,11 +94,9 @@ export function buildHistogram(
 
     const xTickFormat = (n: number): string => localizedNumber(n);
     const adjustedRange = scaleLinear().range([0.7, 0.3]);
-    const colourScale = scaleSequential((n) =>
-        interpolateGreens(adjustedRange(n)!),
-    ).domain([xMin!, xMax!]);
+    const colourScale = scaleSequential((n) => interpolateGreens(adjustedRange(n)!)).domain([xMin!, xMax!]);
 
-    const total = sum(bins as any, binValue);
+    const total = sum(bins as any, getNumericMapBinValue);
 
     function hoverText(
         bin: Bin<number, number>,
@@ -156,7 +105,7 @@ export function buildHistogram(
     ): string {
         const days = dayLabel(bin.x0!, bin.x1!);
         const cards = tr.statisticsCardsDue({
-            cards: binValue(bin as any),
+            cards: getNumericMapBinValue(bin as any),
         });
         const totalLabel = tr.statisticsRunningTotal();
 
@@ -199,7 +148,7 @@ export function buildHistogram(
             onClick: browserLinksSupported ? onClick : null,
             showArea: true,
             colourScale,
-            binValue,
+            binValue: getNumericMapBinValue,
             xTickFormat,
         },
         tableData,

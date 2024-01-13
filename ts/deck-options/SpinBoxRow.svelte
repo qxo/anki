@@ -3,25 +3,29 @@
     License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import Row from "../components/Row.svelte";
     import Col from "../components/Col.svelte";
-    import TooltipLabel from "./TooltipLabel.svelte";
-    import SpinBox from "./SpinBox.svelte";
-    import RevertButton from "./RevertButton.svelte";
+    import ConfigInput from "../components/ConfigInput.svelte";
+    import RevertButton from "../components/RevertButton.svelte";
+    import Row from "../components/Row.svelte";
+    import SpinBox from "../components/SpinBox.svelte";
 
-    export let value: any;
-    export let defaultValue: any;
+    export let value: number;
+    export let defaultValue: number;
     export let min = 0;
-    export let max: number | undefined = undefined;
-    export let markdownTooltip: string;
+    export let max = 9999;
 </script>
 
-<Row --cols={12}>
-    <Col --col-size={7} breakpoint="sm">
-        <TooltipLabel {markdownTooltip}><slot /></TooltipLabel>
+<Row --cols={13}>
+    <Col --col-size={7} breakpoint="xs">
+        <slot />
     </Col>
-    <Col --col-size={5} breakpoint="sm">
-        <SpinBox bind:value {min} {max} />
-        <RevertButton bind:value {defaultValue} />
+    <Col --col-size={6} breakpoint="xs">
+        <Row class="flex-grow-1">
+            <slot name="tabs" />
+            <ConfigInput>
+                <SpinBox bind:value {min} {max} />
+                <RevertButton slot="revert" bind:value {defaultValue} />
+            </ConfigInput>
+        </Row>
     </Col>
 </Row>

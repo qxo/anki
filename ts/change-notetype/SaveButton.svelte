@@ -3,15 +3,13 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr from "../lib/ftl";
-    import type { ChangeNotetypeState } from "./lib";
-    import { withButton } from "../components/helpers";
+    import * as tr from "@tslib/ftl";
+    import { getPlatformString } from "@tslib/shortcuts";
 
     import ButtonGroup from "../components/ButtonGroup.svelte";
-    import ButtonGroupItem from "../components/ButtonGroupItem.svelte";
-
     import LabelButton from "../components/LabelButton.svelte";
-    import WithShortcut from "../components/WithShortcut.svelte";
+    import Shortcut from "../components/Shortcut.svelte";
+    import type { ChangeNotetypeState } from "./lib";
 
     export let state: ChangeNotetypeState;
 
@@ -21,17 +19,25 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
         state.save();
     }
+
+    const keyCombination = "Control+Enter";
 </script>
 
 <ButtonGroup>
-    <ButtonGroupItem>
-        <WithShortcut shortcut={"Control+Enter"} let:createShortcut let:shortcutLabel>
-            <LabelButton
-                theme="primary"
-                on:click={() => save()}
-                tooltip={shortcutLabel}
-                on:mount={withButton(createShortcut)}>{tr.actionsSave()}</LabelButton
-            >
-        </WithShortcut>
-    </ButtonGroupItem>
+    <LabelButton
+        primary
+        tooltip={getPlatformString(keyCombination)}
+        on:click={save}
+        --border-left-radius="5px"
+        --border-right-radius="5px"
+    >
+        <div class="save">{tr.actionsSave()}</div>
+    </LabelButton>
+    <Shortcut {keyCombination} on:action={save} />
 </ButtonGroup>
+
+<style lang="scss">
+    .save {
+        margin: 0.15rem 0.75rem;
+    }
+</style>

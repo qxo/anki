@@ -32,12 +32,13 @@ from dataclasses import dataclass
 from typing import Any, Sequence, Union
 
 import anki
+import anki.cards
+import anki.collection
+import anki.notes
 from anki import card_rendering_pb2, hooks
-from anki.cards import Card
 from anki.decks import DeckManager
 from anki.errors import TemplateError
 from anki.models import NotetypeDict
-from anki.notes import Note
 from anki.sound import AVTag, SoundOrVideoTag, TTSTag
 from anki.utils import to_json_bytes
 
@@ -116,14 +117,16 @@ class TemplateRenderContext:
     using the _private fields directly."""
 
     @staticmethod
-    def from_existing_card(card: Card, browser: bool) -> TemplateRenderContext:
+    def from_existing_card(
+        card: anki.cards.Card, browser: bool
+    ) -> TemplateRenderContext:
         return TemplateRenderContext(card.col, card, card.note(), browser)
 
     @classmethod
     def from_card_layout(
         cls,
-        note: Note,
-        card: Card,
+        note: anki.notes.Note,
+        card: anki.cards.Card,
         notetype: NotetypeDict,
         template: dict,
         fill_empty: bool,
@@ -140,8 +143,8 @@ class TemplateRenderContext:
     def __init__(
         self,
         col: anki.collection.Collection,
-        card: Card,
-        note: Note,
+        card: anki.cards.Card,
+        note: anki.notes.Note,
         browser: bool = False,
         notetype: NotetypeDict = None,
         template: dict | None = None,
@@ -155,6 +158,7 @@ class TemplateRenderContext:
         self._fill_empty = fill_empty
         self._fields: dict | None = None
         self._latex_svg = False
+        self._question_side: bool = True
         if not notetype:
             self._note_type = note.note_type()
         else:
@@ -163,6 +167,10 @@ class TemplateRenderContext:
         # if you need to store extra state to share amongst rendering
         # hooks, you can insert it into this dictionary
         self.extra_state: dict[str, Any] = {}
+
+    @property
+    def question_side(self) -> bool:
+        return self._question_side
 
     def col(self) -> anki.collection.Collection:
         return self._col
@@ -188,14 +196,14 @@ class TemplateRenderContext:
 
         return self._fields
 
-    def card(self) -> Card:
+    def card(self) -> anki.cards.Card:
         """Returns the card being rendered.
 
         Be careful not to call .question() or .answer() on the card, or you'll create an
         infinite loop."""
         return self._card
 
-    def note(self) -> Note:
+    def note(self) -> anki.notes.Note:
         return self._note
 
     def note_type(self) -> NotetypeDict:
@@ -223,9 +231,11 @@ class TemplateRenderContext:
                 answer_av_tags=[],
             )
 
+        self._question_side = True
         qtext = apply_custom_filters(partial.qnodes, self, front_side=None)
         qout = self.col()._backend.extract_av_tags(text=qtext, question_side=True)
 
+        self._question_side = False
         atext = apply_custom_filters(partial.anodes, self, front_side=qout.text)
         aout = self.col()._backend.extract_av_tags(text=atext, question_side=False)
 
@@ -252,6 +262,7 @@ class TemplateRenderContext:
                 card_ord=self._card.ord,
                 template=to_json_bytes(self._template),
                 fill_empty=self._fill_empty,
+                partial_render=True,
             )
             # when rendering card layout, the css changes have not been
             # committed; we need the current notetype instance instead
@@ -259,7 +270,7 @@ class TemplateRenderContext:
         else:
             # existing card (eg study mode)
             out = self._col._backend.render_existing_card(
-                card_id=self._card.id, browser=self._browser
+                card_id=self._card.id, browser=self._browser, partial_render=True
             )
         return PartiallyRenderedCard.from_proto(out)
 
@@ -281,7 +292,7 @@ class TemplateRenderOutput:
 
 
 # legacy
-def templates_for_card(card: Card, browser: bool) -> tuple[str, str]:
+def templates_for_card(card: anki.cards.Card, browser: bool) -> tuple[str, str]:
     template = card.template()
     if browser:
         question, answer = template.get("bqfmt"), template.get("bafmt")
@@ -317,7 +328,7 @@ def apply_custom_filters(
                     field_text, node.field_name, filter_name, ctx
                 )
                 # legacy hook - the second and fifth argument are no longer used.
-                field_text = anki.hooks.runFilter(
+                field_text = hooks.runFilter(
                     f"fmod_{filter_name}",
                     field_text,
                     "",

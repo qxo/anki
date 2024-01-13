@@ -2,57 +2,69 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 mod cardgen;
+mod checks;
 mod emptycards;
 mod fields;
+mod merge;
 mod notetypechange;
 mod render;
-mod schema11;
+mod restore;
+pub(crate) mod schema11;
 mod schemachange;
-mod stock;
+mod service;
+pub(crate) mod stock;
 mod templates;
 pub(crate) mod undo;
 
-use regex::Regex;
-use std::{
-    collections::{HashMap, HashSet},
-    iter::FromIterator,
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter::FromIterator;
+use std::sync::Arc;
 
-pub(crate) use cardgen::{AlreadyGeneratedCardInfo, CardGenContext};
+pub use anki_proto::notetypes::notetype::config::card_requirement::Kind as CardRequirementKind;
+pub use anki_proto::notetypes::notetype::config::CardRequirement;
+pub use anki_proto::notetypes::notetype::config::Kind as NotetypeKind;
+pub use anki_proto::notetypes::notetype::field::Config as NoteFieldConfig;
+pub use anki_proto::notetypes::notetype::template::Config as CardTemplateConfig;
+pub use anki_proto::notetypes::notetype::Config as NotetypeConfig;
+pub use anki_proto::notetypes::notetype::Field as NoteFieldProto;
+pub use anki_proto::notetypes::notetype::Template as CardTemplateProto;
+pub use anki_proto::notetypes::Notetype as NotetypeProto;
+pub(crate) use cardgen::AlreadyGeneratedCardInfo;
+pub(crate) use cardgen::CardGenContext;
 pub use fields::NoteField;
 use lazy_static::lazy_static;
-pub use notetypechange::{ChangeNotetypeInput, NotetypeChangeInfo};
+pub use notetypechange::ChangeNotetypeInput;
+pub use notetypechange::NotetypeChangeInfo;
+use regex::Regex;
 pub(crate) use render::RenderCardOutput;
-pub use schema11::{CardTemplateSchema11, NoteFieldSchema11, NotetypeSchema11};
+pub use schema11::CardTemplateSchema11;
+pub use schema11::NoteFieldSchema11;
+pub use schema11::NotetypeSchema11;
 pub use stock::all_stock_notetypes;
 pub use templates::CardTemplate;
 use unicase::UniCase;
 
-pub use crate::backend_proto::{
-    notetype::{
-        config::{
-            card_requirement::Kind as CardRequirementKind, CardRequirement, Kind as NotetypeKind,
-        },
-        field::Config as NoteFieldConfig,
-        template::Config as CardTemplateConfig,
-        Config as NotetypeConfig, Field as NoteFieldProto, Template as CardTemplateProto,
-    },
-    Notetype as NotetypeProto,
-};
-use crate::{
-    define_newtype,
-    error::{TemplateSaveError, TemplateSaveErrorDetails},
-    prelude::*,
-    search::{Node, SearchNode},
-    storage::comma_separated_ids,
-    template::{FieldRequirements, ParsedTemplate},
-    text::ensure_string_in_nfc,
-};
+use crate::define_newtype;
+use crate::error::CardTypeError;
+use crate::error::CardTypeErrorDetails;
+use crate::error::CardTypeSnafu;
+use crate::error::MissingClozeSnafu;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::Node;
+use crate::search::SearchNode;
+use crate::storage::comma_separated_ids;
+use crate::template::FieldRequirements;
+use crate::template::ParsedTemplate;
+use crate::text::ensure_string_in_nfc;
+use crate::text::extract_underscored_css_imports;
+use crate::text::extract_underscored_references;
 
 define_newtype!(NotetypeId, i64);
 
 pub(crate) const DEFAULT_CSS: &str = include_str!("styling.css");
+pub(crate) const DEFAULT_CLOZE_CSS: &str = include_str!("cloze_styling.css");
 pub(crate) const DEFAULT_LATEX_HEADER: &str = include_str!("header.tex");
 pub(crate) const DEFAULT_LATEX_FOOTER: &str = r"\end{document}";
 lazy_static! {
@@ -88,13 +100,26 @@ impl Default for Notetype {
             usn: Usn(0),
             fields: vec![],
             templates: vec![],
-            config: NotetypeConfig {
-                css: DEFAULT_CSS.into(),
-                latex_pre: DEFAULT_LATEX_HEADER.into(),
-                latex_post: DEFAULT_LATEX_FOOTER.into(),
-                ..Default::default()
-            },
+            config: Notetype::new_config(),
         }
+    }
+}
+
+impl Notetype {
+    pub(crate) fn new_config() -> NotetypeConfig {
+        NotetypeConfig {
+            css: DEFAULT_CSS.into(),
+            latex_pre: DEFAULT_LATEX_HEADER.into(),
+            latex_post: DEFAULT_LATEX_FOOTER.into(),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn new_cloze_config() -> NotetypeConfig {
+        let mut config = Self::new_config();
+        config.css += DEFAULT_CLOZE_CSS;
+        config.kind = NotetypeKind::Cloze as i32;
+        config
     }
 }
 
@@ -112,7 +137,7 @@ impl Notetype {
             self.templates.get(card_ord as usize)
         };
 
-        template.ok_or(AnkiError::NotFound)
+        template.or_not_found(card_ord)
     }
 }
 
@@ -144,7 +169,7 @@ impl Collection {
             let original = col
                 .storage
                 .get_notetype(notetype.id)?
-                .ok_or(AnkiError::NotFound)?;
+                .or_not_found(notetype.id)?;
             let usn = col.usn()?;
             notetype.set_modified(usn);
             col.add_or_update_notetype_with_existing_id_inner(
@@ -156,8 +181,8 @@ impl Collection {
         })
     }
 
-    /// Used to support the current importing code; does not mark notetype as modified,
-    /// and does not support undo.
+    /// Used to support the current importing code; does not mark notetype as
+    /// modified, and does not support undo.
     pub fn add_or_update_notetype_with_existing_id(
         &mut self,
         notetype: &mut Notetype,
@@ -191,11 +216,21 @@ impl Collection {
         }
     }
 
-    pub fn get_all_notetypes(&mut self) -> Result<HashMap<NotetypeId, Arc<Notetype>>> {
+    pub fn get_all_notetypes(&mut self) -> Result<Vec<Arc<Notetype>>> {
         self.storage
-            .get_all_notetype_names()?
+            .get_all_notetype_ids()?
             .into_iter()
-            .map(|(ntid, _)| {
+            .filter_map(|ntid| self.get_notetype(ntid).transpose())
+            .collect()
+    }
+
+    pub fn get_all_notetypes_of_search_notes(
+        &mut self,
+    ) -> Result<HashMap<NotetypeId, Arc<Notetype>>> {
+        self.storage
+            .all_notetypes_of_search_notes()?
+            .into_iter()
+            .map(|ntid| {
                 self.get_notetype(ntid)
                     .transpose()
                     .unwrap()
@@ -211,18 +246,16 @@ impl Collection {
     /// Return the notetype used by `note_ids`, or an error if not exactly 1
     /// notetype is in use.
     pub fn get_single_notetype_of_notes(&mut self, note_ids: &[NoteId]) -> Result<NotetypeId> {
-        if note_ids.is_empty() {
-            return Err(AnkiError::NotFound);
-        }
+        require!(!note_ids.is_empty(), "no note id provided");
 
         let nids_node: Node = SearchNode::NoteIds(comma_separated_ids(note_ids)).into();
         let note1 = self
             .storage
             .get_note(*note_ids.first().unwrap())?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(note_ids[0])?;
 
         if self
-            .search_notes_unordered(match_all![note1.notetype_id, nids_node])?
+            .search_notes_unordered(note1.notetype_id.and(nids_node))?
             .len()
             != note_ids.len()
         {
@@ -327,12 +360,11 @@ impl Notetype {
                 // provided ordinal not on any existing field; cap to bounds
                 self.config
                     .sort_field_idx
-                    .max(0)
-                    .min((self.fields.len() - 1) as u32)
+                    .clamp(0, (self.fields.len() - 1) as u32)
             });
     }
 
-    fn ensure_template_fronts_unique(&self) -> Result<()> {
+    fn ensure_template_fronts_unique(&self) -> Result<(), CardTypeError> {
         lazy_static! {
             static ref CARD_TAG: Regex = Regex::new(r"\{\{\s*Card\s*\}\}").unwrap();
         }
@@ -341,11 +373,11 @@ impl Notetype {
         for (index, card) in self.templates.iter().enumerate() {
             if let Some(old_index) = map.insert(&card.config.q_format, index) {
                 if !CARD_TAG.is_match(&card.config.q_format) {
-                    return Err(AnkiError::TemplateSaveError(TemplateSaveError {
+                    return Err(CardTypeError {
                         notetype: self.name.clone(),
                         ordinal: index,
-                        details: TemplateSaveErrorDetails::Duplicate(old_index),
-                    }));
+                        source: CardTypeErrorDetails::Duplicate { index: old_index },
+                    });
                 }
             }
         }
@@ -358,30 +390,32 @@ impl Notetype {
     fn ensure_valid_parsed_templates(
         &self,
         templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
-    ) -> Result<()> {
-        if let Some((invalid_index, details)) =
-            templates.iter().enumerate().find_map(|(index, sides)| {
-                if let (Some(q), Some(a)) = sides {
-                    let q_fields = q.fields();
-                    if q_fields.is_empty() {
-                        Some((index, TemplateSaveErrorDetails::NoFrontField))
-                    } else if self.unknown_field_name(q_fields.union(&a.fields())) {
-                        Some((index, TemplateSaveErrorDetails::NoSuchField))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some((index, TemplateSaveErrorDetails::TemplateError))
-                }
-            })
-        {
-            Err(AnkiError::TemplateSaveError(TemplateSaveError {
-                notetype: self.name.clone(),
-                ordinal: invalid_index,
-                details,
-            }))
-        } else {
+    ) -> Result<(), CardTypeError> {
+        for (ordinal, sides) in templates.iter().enumerate() {
+            self.ensure_valid_parsed_card_templates(sides)
+                .context(CardTypeSnafu {
+                    notetype: &self.name,
+                    ordinal,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn ensure_valid_parsed_card_templates(
+        &self,
+        sides: &(Option<ParsedTemplate>, Option<ParsedTemplate>),
+    ) -> Result<(), CardTypeErrorDetails> {
+        if let (Some(q), Some(a)) = sides {
+            let q_fields = q.all_referenced_field_names();
+            if q_fields.is_empty() {
+                return Err(CardTypeErrorDetails::NoFrontField);
+            }
+            if self.unknown_field_name(q_fields.union(&a.all_referenced_field_names())) {
+                return Err(CardTypeErrorDetails::NoSuchField);
+            }
             Ok(())
+        } else {
+            Err(CardTypeErrorDetails::TemplateParseError)
         }
     }
 
@@ -403,15 +437,15 @@ impl Notetype {
     fn ensure_cloze_if_cloze_notetype(
         &self,
         parsed_templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
-    ) -> Result<()> {
+    ) -> Result<(), CardTypeError> {
         if self.is_cloze() && missing_cloze_filter(parsed_templates) {
-            return Err(AnkiError::TemplateSaveError(TemplateSaveError {
-                notetype: self.name.clone(),
-                ordinal: 0,
-                details: TemplateSaveErrorDetails::MissingCloze,
-            }));
+            MissingClozeSnafu.fail().context(CardTypeSnafu {
+                notetype: &self.name,
+                ordinal: 0usize,
+            })
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub(crate) fn normalize_names(&mut self) {
@@ -424,8 +458,9 @@ impl Notetype {
         }
     }
 
-    pub(crate) fn add_field<S: Into<String>>(&mut self, name: S) {
+    pub(crate) fn add_field<S: Into<String>>(&mut self, name: S) -> &mut NoteFieldConfig {
         self.fields.push(NoteField::new(name));
+        self.fields.last_mut().map(|f| &mut f.config).unwrap()
     }
 
     pub(crate) fn add_template<S1, S2, S3>(&mut self, name: S1, qfmt: S2, afmt: S3)
@@ -442,19 +477,13 @@ impl Notetype {
         existing: Option<&Notetype>,
         skip_checks: bool,
     ) -> Result<()> {
-        if self.fields.is_empty() {
-            return Err(AnkiError::invalid_input("1 field required"));
-        }
-        if self.templates.is_empty() {
-            return Err(AnkiError::invalid_input("1 template required"));
-        }
+        require!(!self.fields.is_empty(), "1 field required");
+        require!(!self.templates.is_empty(), "1 template required");
         let bad_chars = |c| c == '"';
         if self.name.contains(bad_chars) {
             self.name = self.name.replace(bad_chars, "");
         }
-        if self.name.is_empty() {
-            return Err(AnkiError::invalid_input("Empty note type name"));
-        }
+        require!(!self.name.is_empty(), "Empty notetype name");
         self.normalize_names();
         self.fix_field_names()?;
         self.fix_template_names()?;
@@ -473,11 +502,19 @@ impl Notetype {
         }
         self.config.reqs = reqs;
         if !skip_checks {
-            self.ensure_template_fronts_unique()?;
-            self.ensure_valid_parsed_templates(&parsed_templates)?;
-            self.ensure_cloze_if_cloze_notetype(&parsed_templates)?;
+            self.check_templates(parsed_templates)?;
         }
 
+        Ok(())
+    }
+
+    fn check_templates(
+        &self,
+        parsed_templates: Vec<(Option<ParsedTemplate>, Option<ParsedTemplate>)>,
+    ) -> Result<()> {
+        self.ensure_template_fronts_unique()
+            .and(self.ensure_valid_parsed_templates(&parsed_templates))
+            .and(self.ensure_cloze_if_cloze_notetype(&parsed_templates))?;
         Ok(())
     }
 
@@ -516,13 +553,21 @@ impl Notetype {
         fields: HashMap<String, Option<String>>,
         parsed: &mut [(Option<ParsedTemplate>, Option<ParsedTemplate>)],
     ) {
+        let first_remaining_field_name = &self.fields.get(0).unwrap().name;
+        let is_cloze = self.is_cloze();
         for (idx, (q_opt, a_opt)) in parsed.iter_mut().enumerate() {
             if let Some(q) = q_opt {
                 q.rename_and_remove_fields(&fields);
+                if !q.contains_field_replacement() || is_cloze && !q.contains_cloze_replacement() {
+                    q.add_missing_field_replacement(first_remaining_field_name, is_cloze);
+                }
                 self.templates[idx].config.q_format = q.template_to_string();
             }
             if let Some(a) = a_opt {
                 a.rename_and_remove_fields(&fields);
+                if is_cloze && !a.contains_cloze_replacement() {
+                    a.add_missing_field_replacement(first_remaining_field_name, is_cloze);
+                }
                 self.templates[idx].config.a_format = a.template_to_string();
             }
         }
@@ -565,14 +610,15 @@ impl Notetype {
         matches!(self.config.kind(), NotetypeKind::Cloze)
     }
 
-    /// Return all clozable fields. A field is clozable when it belongs to a cloze
-    /// notetype and a 'cloze' filter is applied to it in the template.
+    /// Return all clozable fields. A field is clozable when it belongs to a
+    /// cloze notetype and a 'cloze' filter is applied to it in the
+    /// template.
     pub(crate) fn cloze_fields(&self) -> HashSet<usize> {
         if !self.is_cloze() {
             HashSet::new()
         } else if let Some((Some(front), _)) = self.parsed_templates().get(0) {
             front
-                .cloze_fields()
+                .all_referenced_cloze_field_names()
                 .iter()
                 .filter_map(|name| self.get_field_ord(name))
                 .collect()
@@ -580,9 +626,23 @@ impl Notetype {
             HashSet::new()
         }
     }
+
+    pub(crate) fn gather_media_names(&self, inserter: &mut impl FnMut(String)) {
+        for name in extract_underscored_css_imports(&self.config.css) {
+            inserter(name.to_string());
+        }
+        for template in &self.templates {
+            for template_side in [&template.config.q_format, &template.config.a_format] {
+                for name in extract_underscored_references(template_side) {
+                    inserter(name.to_string());
+                }
+            }
+        }
+    }
 }
 
-/// True if the slice is empty or either template of the first tuple doesn't have a cloze field.
+/// True if the slice is empty or either template of the first tuple doesn't
+/// have a cloze field.
 fn missing_cloze_filter(
     parsed_templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
 ) -> bool {
@@ -595,7 +655,7 @@ fn missing_cloze_filter(
 fn has_cloze(template: &Option<ParsedTemplate>) -> bool {
     template
         .as_ref()
-        .map_or(false, |t| !t.cloze_fields().is_empty())
+        .map_or(false, |t| !t.all_referenced_cloze_field_names().is_empty())
 }
 
 impl From<Notetype> for NotetypeProto {
@@ -648,7 +708,7 @@ impl Collection {
 
     /// - Caller must set notetype as modified if appropriate.
     /// - This only supports undo when an existing notetype is passed in.
-    fn add_or_update_notetype_with_existing_id_inner(
+    pub(crate) fn add_or_update_notetype_with_existing_id_inner(
         &mut self,
         notetype: &mut Notetype,
         original: Option<Notetype>,
@@ -666,7 +726,7 @@ impl Collection {
                 original.config.sort_field_idx,
                 normalize,
             )?;
-            self.update_cards_for_changed_templates(notetype, original.templates.len())?;
+            self.update_cards_for_changed_templates(notetype, &original.templates)?;
             self.update_notetype_undoable(notetype, original)?;
         } else {
             // adding with existing id for old undo code, bypass undo
@@ -678,7 +738,7 @@ impl Collection {
         Ok(())
     }
 
-    fn remove_notetype_inner(&mut self, ntid: NotetypeId) -> Result<()> {
+    pub(crate) fn remove_notetype_inner(&mut self, ntid: NotetypeId) -> Result<()> {
         let notetype = if let Some(notetype) = self.storage.get_notetype(ntid)? {
             notetype
         } else {
@@ -706,5 +766,75 @@ impl Collection {
         } else {
             self.set_current_notetype_id(all[0].0)
         }
+    }
+}
+
+// Tests
+//---------------------------------------
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn update_templates_after_removing_crucial_fields() {
+        // Normal Test (all front fields removed)
+        let mut nt_norm = Notetype::default();
+        nt_norm.add_field("baz"); // Fields "foo" and "bar" were removed
+        nt_norm.fields[0].ord = Some(2);
+
+        nt_norm.add_template("Card 1", "front {{foo}}", "back {{bar}}");
+        nt_norm.templates[0].ord = Some(0);
+        let mut parsed = nt_norm.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("foo".to_owned(), None);
+        field_map.insert("bar".to_owned(), None);
+
+        nt_norm.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_norm.templates[0].config.q_format, "front {{baz}}");
+        assert_eq!(nt_norm.templates[0].config.a_format, "back ");
+
+        // Cloze Test 1/2 (front and back cloze fields removed)
+        let mut nt_cloze = Notetype {
+            config: Notetype::new_cloze_config(),
+            ..Default::default()
+        };
+        nt_cloze.add_field("baz"); // Fields "foo" and "bar" were removed
+        nt_cloze.fields[0].ord = Some(2);
+
+        nt_cloze.add_template("Card 1", "front {{cloze:foo}}", "back {{cloze:bar}}");
+        nt_cloze.templates[0].ord = Some(0);
+        let mut parsed = nt_cloze.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("foo".to_owned(), None);
+        field_map.insert("bar".to_owned(), None);
+
+        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:baz}}");
+        assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:baz}}");
+
+        // Cloze Test 2/2 (only back cloze field is removed)
+        let mut nt_cloze = Notetype {
+            config: Notetype::new_cloze_config(),
+            ..Default::default()
+        };
+        nt_cloze.add_field("foo");
+        nt_cloze.fields[0].ord = Some(0);
+        nt_cloze.add_field("baz");
+        nt_cloze.fields[1].ord = Some(2);
+        // ^ only field "bar" was removed
+
+        nt_cloze.add_template("Card 1", "front {{cloze:foo}}", "back {{cloze:bar}}");
+        nt_cloze.templates[0].ord = Some(0);
+        let mut parsed = nt_cloze.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("bar".to_owned(), None);
+
+        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:foo}}");
+        assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:foo}}");
     }
 }

@@ -3,10 +3,13 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{params, Row};
+use rusqlite::params;
+use rusqlite::Row;
 
 use super::SqliteStorage;
-use crate::{error::Result, tags::Tag, types::Usn};
+use crate::error::Result;
+use crate::tags::Tag;
+use crate::types::Usn;
 
 fn row_to_tag(row: &Row) -> Result<Tag> {
     Ok(Tag {
@@ -18,7 +21,7 @@ fn row_to_tag(row: &Row) -> Result<Tag> {
 
 impl SqliteStorage {
     /// All tags in the collection, in alphabetical order.
-    pub(crate) fn all_tags(&self) -> Result<Vec<Tag>> {
+    pub fn all_tags(&self) -> Result<Vec<Tag>> {
         self.db
             .prepare_cached(include_str!("get.sql"))?
             .query_and_then([], row_to_tag)?

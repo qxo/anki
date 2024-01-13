@@ -1,27 +1,31 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { setupI18n, ModuleName } from "../lib/i18n";
-import { checkNightMode } from "../lib/nightmode";
+import "./card-info-base.scss";
+
+import { ModuleName, setupI18n } from "@tslib/i18n";
+import { checkNightMode } from "@tslib/nightmode";
 
 import CardInfo from "./CardInfo.svelte";
-import "./card-info-base.css";
 
 const i18n = setupI18n({
     modules: [ModuleName.CARD_STATS, ModuleName.SCHEDULING, ModuleName.STATISTICS],
 });
 
-export async function setupCardInfo(): Promise<CardInfo> {
+export async function setupCardInfo(
+    target: HTMLElement,
+    props = {},
+): Promise<CardInfo> {
     checkNightMode();
     await i18n;
 
-    return new CardInfo({ target: document.body, props: { includeRevlog: true } });
+    return new CardInfo({ target, props });
 }
-
-export const cardInfoPromise = setupCardInfo();
 
 if (window.location.hash.startsWith("#test")) {
     // use #testXXXX where XXXX is card ID to test
-    const cardId = parseInt(window.location.hash.substr("#test".length), 10);
-    cardInfoPromise.then((cardInfo: CardInfo): void => cardInfo.$set({ cardId }));
+    const cardId = parseInt(window.location.hash.substring(0, "#test".length), 10);
+    setupCardInfo(document.body).then(
+        (cardInfo: CardInfo): Promise<void> => cardInfo.updateStats(BigInt(cardId)),
+    );
 }

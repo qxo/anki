@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import * as tr from "./ftl";
+import * as tr from "@tslib/ftl";
 
 export const SECOND = 1.0;
 export const MINUTE = 60.0 * SECOND;
@@ -53,7 +53,7 @@ export function naturalUnit(secs: number): TimespanUnit {
     }
 }
 
-/// Number of seconds in a given unit.
+/** Number of seconds in a given unit. */
 export function unitSeconds(unit: TimespanUnit): number {
     switch (unit) {
         case TimespanUnit.Seconds:
@@ -75,7 +75,7 @@ export function unitAmount(unit: TimespanUnit, secs: number): number {
     return secs / unitSeconds(unit);
 }
 
-/// Largest unit provided seconds can be divided by without a remainder.
+/** Largest unit provided seconds can be divided by without a remainder. */
 export function naturalWholeUnit(secs: number): TimespanUnit {
     let unit = naturalUnit(secs);
     while (unit != TimespanUnit.Seconds) {
@@ -108,7 +108,7 @@ export function studiedToday(cards: number, secs: number): string {
 function i18nFuncForUnit(
     unit: TimespanUnit,
     short: boolean,
-): ({ amount: number }) => string {
+): (_: { amount: number }) => string {
     if (short) {
         switch (unit) {
             case TimespanUnit.Seconds:
@@ -142,13 +142,16 @@ function i18nFuncForUnit(
     }
 }
 
-/// Describe the given seconds using the largest appropriate unit.
-/// If precise is true, show to two decimal places, eg
-/// eg 70 seconds -> "1.17 minutes"
-/// If false, seconds and days are shown without decimals.
-export function timeSpan(seconds: number, short = false): string {
+/** Describe the given seconds using the largest appropriate unit.
+If precise is true, show to two decimal places, eg
+eg 70 seconds -> "1.17 minutes"
+If false, seconds and days are shown without decimals. */
+export function timeSpan(seconds: number, short = false, precise = true): string {
     const unit = naturalUnit(seconds);
-    const amount = unitAmount(unit, seconds);
+    let amount = unitAmount(unit, seconds);
+    if (!precise && unit < TimespanUnit.Months) {
+        amount = Math.round(amount);
+    }
     return i18nFuncForUnit(unit, short)({ amount });
 }
 

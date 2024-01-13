@@ -48,7 +48,7 @@ class Models(QDialog):
         parent = parent or mw
         self.fromMain = fromMain
         self.selected_notetype_id = selected_notetype_id
-        QDialog.__init__(self, parent, Qt.WindowType.Window)
+        QDialog.__init__(self, parent or mw)
         self.col = mw.col.weakref()
         assert self.col
         self.mm = self.col.models
@@ -61,7 +61,7 @@ class Models(QDialog):
         self.models: Sequence[NotetypeNameIdUseCount] = []
         self.setupModels()
         restoreGeom(self, "models")
-        self.exec()
+        self.show()
 
     # Models
     ##########################################################################
@@ -144,21 +144,23 @@ class Models(QDialog):
         return self.mm.get(NotetypeId(self.models[row].id))
 
     def onAdd(self) -> None:
-        m = AddModel(self.mw, self).get()
-        if m:
+        def on_success(notetype: NotetypeDict) -> None:
             # if legacy add-ons already added the notetype, skip adding
-            if m["id"]:
+            if notetype["id"]:
+                self.refresh_list()
                 return
 
             # prompt for name
-            text, ok = getText(tr.actions_name(), default=m["name"])
+            text, ok = getText(tr.actions_name(), default=notetype["name"], parent=self)
             if not ok or not text.strip():
                 return
-            m["name"] = text
+            notetype["name"] = text
 
-            add_notetype_legacy(parent=self, notetype=m).success(
+            add_notetype_legacy(parent=self, notetype=notetype).success(
                 self.refresh_list
             ).run_in_background()
+
+        AddModel(self.mw, on_success, self)
 
     def onDelete(self) -> None:
         if len(self.models) < 2:
@@ -231,7 +233,12 @@ class Models(QDialog):
 class AddModel(QDialog):
     model: Optional[NotetypeDict]
 
-    def __init__(self, mw: AnkiQt, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        mw: AnkiQt,
+        on_success: Callable[[NotetypeDict], None],
+        parent: Optional[QWidget] = None,
+    ) -> None:
         self.parent_ = parent or mw
         self.mw = mw
         self.col = mw.col
@@ -239,12 +246,13 @@ class AddModel(QDialog):
         self.model = None
         self.dialog = aqt.forms.addmodel.Ui_Dialog()
         self.dialog.setupUi(self)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         disable_help_button(self)
         # standard models
         self.notetypes: list[
             Union[NotetypeDict, Callable[[Collection], NotetypeDict]]
         ] = []
-        for (name, func) in stdmodels.get_stock_notetypes(self.col):
+        for name, func in stdmodels.get_stock_notetypes(self.col):
             item = QListWidgetItem(tr.notetypes_add(val=name))
             self.dialog.models.addItem(item)
             self.notetypes.append(func)
@@ -259,10 +267,8 @@ class AddModel(QDialog):
         qconnect(s.activated, self.accept)
         # help
         qconnect(self.dialog.buttonBox.helpRequested, self.onHelp)
-
-    def get(self) -> Optional[NotetypeDict]:
-        self.exec()
-        return self.model
+        self.on_success = on_success
+        self.show()
 
     def reject(self) -> None:
         QDialog.reject(self)
@@ -275,6 +281,9 @@ class AddModel(QDialog):
         else:
             self.model = model(self.col)
         QDialog.accept(self)
+        # On mac, we need to allow time for the existing modal to close or
+        # Qt gets confused.
+        self.mw.progress.single_shot(100, lambda: self.on_success(self.model), True)
 
     def onHelp(self) -> None:
         openHelp(HelpPage.ADDING_A_NOTE_TYPE)

@@ -5,9 +5,16 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-// A standalone bundle that adds mutateNextCardStates to the anki namespace.
-// When all clients are using reviewer.js directly, we can get rid of this.
+// A standalone bundle that adds mutateNextCardStates and the image occlusion API
+// to the anki namespace. When all clients are using reviewer.js directly, we
+// can get rid of this.
 
+import { imageOcclusionAPI } from "../image-occlusion/review";
 import { mutateNextCardStates } from "./answering";
+import { addBrowserClasses } from "./browser_selector";
 
-(window as any).anki.mutateNextCardStates = mutateNextCardStates;
+globalThis.anki = globalThis.anki || {};
+globalThis.anki.mutateNextCardStates = mutateNextCardStates;
+globalThis.anki.imageOcclusion = imageOcclusionAPI;
+globalThis.anki.setupImageCloze = imageOcclusionAPI.setup; // deprecated
+globalThis.anki.addBrowserClasses = addBrowserClasses;

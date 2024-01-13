@@ -22,6 +22,8 @@ import requests
 from bs4 import BeautifulSoup
 
 import aqt
+import aqt.forms
+import aqt.operations
 import aqt.sound
 from anki._legacy import deprecated
 from anki.cards import Card
@@ -29,7 +31,8 @@ from anki.collection import Config, SearchNode
 from anki.consts import MODEL_CLOZE
 from anki.hooks import runFilter
 from anki.httpclient import HttpClient
-from anki.notes import Note, NoteFieldsCheckResult
+from anki.models import NotetypeId, StockNotetype
+from anki.notes import Note, NoteFieldsCheckResult, NoteId
 from anki.utils import checksum, is_lin, is_win, namedtmp
 from aqt import AnkiQt, colors, gui_hooks
 from aqt.operations import QueryOp
@@ -53,9 +56,9 @@ from aqt.utils import (
     tooltip,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
-pics = ("jpg", "jpeg", "png", "tif", "tiff", "gif", "svg", "webp", "ico")
+pics = ("jpg", "jpeg", "png", "tif", "tiff", "gif", "svg", "webp", "ico", "avif")
 audio = (
     "3gp",
     "aac",
@@ -85,6 +88,18 @@ class EditorMode(Enum):
     ADD_CARDS = 0
     EDIT_CURRENT = 1
     BROWSER = 2
+
+
+class EditorState(Enum):
+    """
+    Current input state of the editing UI.
+    """
+
+    INITIAL = -1
+    FIELDS = 0
+    IO_PICKER = 1
+    IO_MASKS = 2
+    IO_FIELDS = 3
 
 
 class Editor:
@@ -121,7 +136,10 @@ class Editor:
         self.last_field_index: int | None = None
         # current card, for card layout
         self.card: Card | None = None
+        self.state: EditorState = EditorState.INITIAL
+        self._init_links()
         self.setupOuter()
+        self.add_webview()
         self.setupWeb()
         self.setupShortcuts()
         gui_hooks.editor_did_init(self)
@@ -136,26 +154,32 @@ class Editor:
         self.widget.setLayout(l)
         self.outerLayout = l
 
-    def setupWeb(self) -> None:
+    def add_webview(self) -> None:
         self.web = EditorWebView(self.widget, self)
         self.web.set_bridge_command(self.onBridgeCmd, self)
         self.outerLayout.addWidget(self.web, 1)
 
+    def setupWeb(self) -> None:
         if self.editorMode == EditorMode.ADD_CARDS:
-            file = "note_creator"
+            mode = "add"
         elif self.editorMode == EditorMode.BROWSER:
-            file = "browser_editor"
+            mode = "browse"
         else:
-            file = "reviewer_editor"
+            mode = "review"
 
         # then load page
         self.web.stdHtml(
             "",
-            css=[f"css/{file}.css"],
-            js=[f"js/{file}.js"],
+            css=["css/editor.css"],
+            js=[
+                "js/mathjax.js",
+                "js/editor.js",
+            ],
             context=self,
             default_css=False,
         )
+        self.web.eval(f"setupEditor('{mode}')")
+        self.web.show()
 
         lefttopbtns: list[str] = []
         gui_hooks.editor_did_init_left_buttons(lefttopbtns, self)
@@ -174,7 +198,7 @@ class Editor:
         righttopbtns_defs = ", ".join([json.dumps(button) for button in righttopbtns])
         righttopbtns_js = (
             f"""
-uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
+require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].toolbar.toolbar.append({{
     component: editorToolbar.AddonButtons,
     id: "addons",
     props: {{ buttons: [ {righttopbtns_defs} ] }},
@@ -227,7 +251,9 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
 
                     def on_hotkey() -> None:
                         on_activated()
-                        self.web.eval(f'toggleEditorButton("#{id}");')
+                        self.web.eval(
+                            f'toggleEditorButton(document.getElementById("{id}"));'
+                        )
 
                 else:
                     on_hotkey = on_activated
@@ -392,7 +418,9 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
                 if gui_hooks.editor_did_unfocus_field(False, self.note, ord):
                     # something updated the note; update it after a subsequent focus
                     # event has had time to fire
-                    self.mw.progress.timer(100, self.loadNoteKeepingFocus, False)
+                    self.mw.progress.timer(
+                        100, self.loadNoteKeepingFocus, False, parent=self.widget
+                    )
                 else:
                     self._check_and_update_duplicate_display_async()
             else:
@@ -454,14 +482,41 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
             if not self.addMode:
                 self._save_current_note()
 
+        elif cmd.startswith("setTagsCollapsed"):
+            (type, collapsed_string) = cmd.split(":", 1)
+            collapsed = collapsed_string == "true"
+            self.setTagsCollapsed(collapsed)
+
+        elif cmd.startswith("editorState"):
+            (_, new_state_id, old_state_id) = cmd.split(":", 2)
+            self.signal_state_change(
+                EditorState(int(new_state_id)), EditorState(int(old_state_id))
+            )
+
+        elif cmd.startswith("ioImageLoaded"):
+            (_, path_or_nid_data) = cmd.split(":", 1)
+            path_or_nid = json.loads(path_or_nid_data)
+            if self.addMode:
+                gui_hooks.editor_mask_editor_did_load_image(self, path_or_nid)
+            else:
+                gui_hooks.editor_mask_editor_did_load_image(
+                    self, NoteId(int(path_or_nid))
+                )
+
         elif cmd in self._links:
-            self._links[cmd](self)
+            return self._links[cmd](self)
 
         else:
             print("uncaught cmd", cmd)
 
     def mungeHTML(self, txt: str) -> str:
         return gui_hooks.editor_will_munge_html(txt, self)
+
+    def signal_state_change(
+        self, new_state: EditorState, old_state: EditorState
+    ) -> None:
+        self.state = new_state
+        gui_hooks.editor_state_did_change(self, new_state, old_state)
 
     # Setting/unsetting the current note
     ######################################################################
@@ -490,7 +545,10 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
         ]
 
         flds = self.note.note_type()["flds"]
+        collapsed = [fld["collapsed"] for fld in flds]
+        plain_texts = [fld.get("plainText", False) for fld in flds]
         descriptions = [fld.get("description", "") for fld in flds]
+        notetype_meta = {"id": self.note.mid, "modTime": self.note.note_type()["mod"]}
 
         self.widget.show()
 
@@ -507,25 +565,44 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
                 self.web.setFocus()
             gui_hooks.editor_did_load_note(self)
 
-        text_color = self.mw.pm.profile.get("lastTextColor", "#00f")
-        highlight_color = self.mw.pm.profile.get("lastHighlightColor", "#00f")
+        text_color = self.mw.pm.profile.get("lastTextColor", "#0000ff")
+        highlight_color = self.mw.pm.profile.get("lastHighlightColor", "#0000ff")
 
-        js = "setFields({}); setDescriptions({}); setFonts({}); focusField({}); setNoteId({}); setColorButtons({}); setTags({}); ".format(
-            json.dumps(data),
-            json.dumps(descriptions),
-            json.dumps(self.fonts()),
-            json.dumps(focusTo),
-            json.dumps(self.note.id),
-            json.dumps([text_color, highlight_color]),
-            json.dumps(self.note.tags),
-        )
+        js = f"""
+            saveSession();
+            setFields({json.dumps(data)});
+            setNotetypeMeta({json.dumps(notetype_meta)});
+            setCollapsed({json.dumps(collapsed)});
+            setPlainTexts({json.dumps(plain_texts)});
+            setDescriptions({json.dumps(descriptions)});
+            setFonts({json.dumps(self.fonts())});
+            focusField({json.dumps(focusTo)});
+            setNoteId({json.dumps(self.note.id)});
+            setColorButtons({json.dumps([text_color, highlight_color])});
+            setTags({json.dumps(self.note.tags)});
+            setTagsCollapsed({json.dumps(self.mw.pm.tags_collapsed(self.editorMode))});
+            setMathjaxEnabled({json.dumps(self.mw.col.get_config("renderMathjax", True))});
+            setShrinkImages({json.dumps(self.mw.col.get_config("shrinkEditorImages", True))});
+            setCloseHTMLTags({json.dumps(self.mw.col.get_config("closeHTMLTags", True))});
+            triggerChanges();
+            setIsImageOcclusion({json.dumps(self.current_notetype_is_image_occlusion())});
+            """
 
         if self.addMode:
             sticky = [field["sticky"] for field in self.note.note_type()["flds"]]
             js += " setSticky(%s);" % json.dumps(sticky)
 
+        if (
+            self.editorMode != EditorMode.ADD_CARDS
+            and self.current_notetype_is_image_occlusion()
+        ):
+            io_options = self._create_edit_io_options(note_id=self.note.id)
+            js += " setupMaskEditor(%s);" % json.dumps(io_options)
+
         js = gui_hooks.editor_will_load_note(js, self.note, self)
-        self.web.evalWithCallback(f"uiPromise.then(() => {{ {js} }})", oncallback)
+        self.web.evalWithCallback(
+            f'require("anki/ui").loaded.then(() => {{ {js} }})', oncallback
+        )
 
     def _save_current_note(self) -> None:
         "Call after note is updated with data from webview."
@@ -545,7 +622,7 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
         "Save unsaved edits then call callback()."
         if not self.note:
             # calling code may not expect the callback to fire immediately
-            self.mw.progress.timer(10, callback, False)
+            self.mw.progress.single_shot(10, callback)
             return
         self.web.evalWithCallback("saveNow(%d)" % keepFocus, lambda res: callback())
 
@@ -579,8 +656,12 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
         elif result == NoteFieldsCheckResult.FIELD_NOT_CLOZE:
             cloze_hint = tr.adding_cloze_outside_cloze_field()
 
-        self.web.eval(f"uiPromise.then(() => setBackgrounds({json.dumps(cols)}));")
-        self.web.eval(f"uiPromise.then(() => setClozeHint({json.dumps(cloze_hint)}));")
+        self.web.eval(
+            'require("anki/ui").loaded.then(() => {'
+            f"setBackgrounds({json.dumps(cols)});\n"
+            f"setClozeHint({json.dumps(cloze_hint)});\n"
+            "}); "
+        )
 
     def showDupes(self) -> None:
         aqt.dialogs.open(
@@ -612,8 +693,9 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
     def cleanup(self) -> None:
         self.set_note(None)
         # prevent any remaining evalWithCallback() events from firing after C++ object deleted
-        self.web.cleanup()
-        self.web = None
+        if self.web:
+            self.web.cleanup()
+            self.web = None
 
     # legacy
 
@@ -636,7 +718,7 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
         self.tags = aqt.tagedit.TagEdit(self.widget)
         qconnect(self.tags.lostFocus, self.on_tag_focus_lost)
         self.tags.setToolTip(shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt()))
-        border = theme_manager.color(colors.BORDER)
+        border = theme_manager.var(colors.BORDER)
         self.tags.setStyleSheet(f"border: 1px solid {border}")
         tb.addWidget(self.tags, 1, 1)
         g.setLayout(tb)
@@ -677,13 +759,15 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
     ######################################################################
 
     def onAddMedia(self) -> None:
+        """Show a file selection screen, then add the selected media.
+        This expects initial setup to have been done by TemplateButtons.svelte."""
         extension_filter = " ".join(
             f"*.{extension}" for extension in sorted(itertools.chain(pics, audio))
         )
         filter = f"{tr.editing_media()} ({extension_filter})"
 
         def accept(file: str) -> None:
-            self.addMedia(file)
+            self.resolve_media(file)
 
         file = getFile(
             parent=self.widget,
@@ -692,16 +776,33 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
             filter=filter,
             key="media",
         )
+
         self.parentWindow.activateWindow()
 
     def addMedia(self, path: str, canDelete: bool = False) -> None:
-        """canDelete is a legacy arg and is ignored."""
+        """Legacy routine used by add-ons to add a media file and update the current field.
+        canDelete is ignored."""
+
         try:
             html = self._addMedia(path)
         except Exception as e:
             showWarning(str(e))
             return
+
         self.web.eval(f"setFormat('inserthtml', {json.dumps(html)});")
+
+    def resolve_media(self, path: str) -> None:
+        """Finish inserting media into a field.
+        This expects initial setup to have been done by TemplateButtons.svelte."""
+        try:
+            html = self._addMedia(path)
+        except Exception as e:
+            showWarning(str(e))
+            return
+
+        self.web.eval(
+            f'require("anki/TemplateButtons").resolveMedia({json.dumps(html)})'
+        )
 
     def _addMedia(self, path: str, canDelete: bool = False) -> str:
         """Add to media folder and return local img or sound tag."""
@@ -718,7 +819,7 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
             self.parentWindow,
             self.mw,
             True,
-            lambda file: self.addMedia(file, canDelete=True),
+            self.resolve_media,
         )
 
     # Media downloads
@@ -727,7 +828,9 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
     def urlToLink(self, url: str) -> str | None:
         fname = self.urlToFile(url)
         if not fname:
-            return None
+            return '<a href="{}">{}</a>'.format(
+                url, html.escape(urllib.parse.unquote(url))
+            )
         return self.fnameToLink(fname)
 
     def fnameToLink(self, fname: str) -> str:
@@ -766,7 +869,7 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
                 data = base64.b64decode(b64data, validate=True)
                 if ext == "jpeg":
                     ext = "jpg"
-                return self._addPastedImage(data, f".{ext}")
+                return self._addPastedImage(data, ext)
 
         return ""
 
@@ -777,11 +880,33 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
 
         return ""
 
-    # ext should include dot
+    def _pasted_image_filename(self, data: bytes, ext: str) -> str:
+        csum = checksum(data)
+        return f"paste-{csum}.{ext}"
+
+    def _read_pasted_image(self, mime: QMimeData) -> str:
+        image = QImage(mime.imageData())
+        buffer = QBuffer()
+        buffer.open(QBuffer.OpenModeFlag.ReadWrite)
+        if self.mw.col.get_config_bool(Config.Bool.PASTE_IMAGES_AS_PNG):
+            ext = "png"
+            quality = 50
+        else:
+            ext = "jpg"
+            quality = 80
+        image.save(buffer, ext, quality)
+        buffer.reset()
+        data = bytes(buffer.readAll())  # type: ignore
+        fname = self._pasted_image_filename(data, ext)
+        path = namedtmp(fname)
+        with open(path, "wb") as file:
+            file.write(data)
+
+        return path
+
     def _addPastedImage(self, data: bytes, ext: str) -> str:
         # hash and write
-        csum = checksum(data)
-        fname = f"paste-{csum}{ext}"
+        fname = self._pasted_image_filename(data, ext)
         return self._addMediaFromData(fname, data)
 
     def _retrieveURL(self, url: str) -> str | None:
@@ -908,7 +1033,122 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
         self.web.onPaste()
 
     def onCutOrCopy(self) -> None:
-        self.web.flagAnkiText()
+        self.web.user_cut_or_copied()
+
+    # Image occlusion
+    ######################################################################
+
+    def current_notetype_is_image_occlusion(self) -> bool:
+        return bool(self.note) and (
+            self.note.note_type().get("originalStockKind", None)
+            == StockNotetype.OriginalStockKind.ORIGINAL_STOCK_KIND_IMAGE_OCCLUSION
+        )
+
+    def setup_mask_editor(self, image_path: str) -> None:
+        try:
+            if self.editorMode == EditorMode.ADD_CARDS:
+                self.setup_mask_editor_for_new_note(
+                    image_path=image_path, notetype_id=0
+                )
+            else:
+                self.setup_mask_editor_for_existing_note(
+                    note_id=self.note.id, image_path=image_path
+                )
+        except Exception as e:
+            showWarning(str(e))
+
+    def select_image_and_occlude(self) -> None:
+        """Show a file selection screen, then get selected image path."""
+        extension_filter = " ".join(
+            f"*.{extension}" for extension in sorted(itertools.chain(pics))
+        )
+        filter = f"{tr.editing_media()} ({extension_filter})"
+
+        file = getFile(
+            parent=self.widget,
+            title=tr.editing_add_media(),
+            cb=cast(Callable[[Any], None], self.setup_mask_editor),
+            filter=filter,
+            key="media",
+        )
+
+        self.parentWindow.activateWindow()
+
+    def select_image_from_clipboard_and_occlude(self) -> None:
+        """Set up the mask editor for the image in the clipboard."""
+
+        clipoard = self.mw.app.clipboard()
+        mime = clipoard.mimeData()
+        if not mime.hasImage():
+            showWarning(tr.editing_no_image_found_on_clipboard())
+            return
+        path = self._read_pasted_image(mime)
+        self.setup_mask_editor(path)
+        self.parentWindow.activateWindow()
+
+    def setup_mask_editor_for_new_note(
+        self,
+        image_path: str,
+        notetype_id: NotetypeId | int = 0,
+    ):
+        """Set-up IO mask editor for adding new notes
+        Presupposes that active editor notetype is an image occlusion notetype
+        Args:
+            image_path: Absolute path to image.
+            notetype_id: ID of note type to use. Provided ID must belong to an
+              image occlusion notetype. Set this to 0 to auto-select the first
+              found image occlusion notetype in the user's collection.
+        """
+        image_field_html = self._addMedia(image_path)
+        io_options = self._create_add_io_options(
+            image_path=image_path,
+            image_field_html=image_field_html,
+            notetype_id=notetype_id,
+        )
+        self._setup_mask_editor(io_options)
+
+    def setup_mask_editor_for_existing_note(
+        self, note_id: NoteId, image_path: str | None = None
+    ):
+        """Set-up IO mask editor for editing existing notes
+        Presupposes that active editor notetype is an image occlusion notetype
+        Args:
+            note_id: ID of note to edit.
+            image_path: (Optional) Absolute path to image that should replace current
+              image
+        """
+        io_options = self._create_edit_io_options(note_id)
+        if image_path:
+            image_field_html = self._addMedia(image_path)
+            self.web.eval(f"resetIOImage({json.dumps(image_path)})")
+            self.web.eval(f"setImageField({json.dumps(image_field_html)})")
+        self._setup_mask_editor(io_options)
+
+    def reset_image_occlusion(self) -> None:
+        self.web.eval("resetIOImageLoaded()")
+
+    def update_occlusions_field(self) -> None:
+        self.web.eval("updateOcclusionsField()")
+
+    def _setup_mask_editor(self, io_options: dict):
+        self.web.eval(
+            'require("anki/ui").loaded.then(() =>'
+            f"setupMaskEditor({json.dumps(io_options)})"
+            "); "
+        )
+
+    @staticmethod
+    def _create_add_io_options(
+        image_path: str, image_field_html: str, notetype_id: NotetypeId | int = 0
+    ) -> dict:
+        return {
+            "mode": {"kind": "add", "imagePath": image_path, "notetypeId": notetype_id},
+            "html": image_field_html,
+        }
+
+    @staticmethod
+    def _create_edit_io_options(note_id: NoteId) -> dict:
+        return {"mode": {"kind": "edit", "noteId": note_id}}
 
     # Legacy editing routines
     ######################################################################
@@ -1093,32 +1333,61 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
     def insertMathjaxChemistry(self) -> None:
         self.web.eval("wrap('\\\\(\\\\ce{', '}\\\\)');")
 
+    def toggleMathjax(self) -> None:
+        self.mw.col.set_config(
+            "renderMathjax", not self.mw.col.get_config("renderMathjax", False)
+        )
+        # hackily redraw the page
+        self.setupWeb()
+        self.loadNoteKeepingFocus()
+
+    def toggleShrinkImages(self) -> None:
+        self.mw.col.set_config(
+            "shrinkEditorImages",
+            not self.mw.col.get_config("shrinkEditorImages", True),
+        )
+
+    def toggleCloseHTMLTags(self) -> None:
+        self.mw.col.set_config(
+            "closeHTMLTags",
+            not self.mw.col.get_config("closeHTMLTags", True),
+        )
+
+    def setTagsCollapsed(self, collapsed: bool) -> None:
+        aqt.mw.pm.set_tags_collapsed(self.editorMode, collapsed)
+
     # Links from HTML
     ######################################################################
 
-    _links: dict[str, Callable] = dict(
-        fields=onFields,
-        cards=onCardLayout,
-        bold=toggleBold,
-        italic=toggleItalic,
-        underline=toggleUnderline,
-        super=toggleSuper,
-        sub=toggleSub,
-        clear=removeFormat,
-        colour=onForeground,
-        changeCol=onChangeCol,
-        cloze=onCloze,
-        attach=onAddMedia,
-        record=onRecSound,
-        more=onAdvanced,
-        dupes=showDupes,
-        paste=onPaste,
-        cutOrCopy=onCutOrCopy,
-        htmlEdit=onHtmlEdit,
-        mathjaxInline=insertMathjaxInline,
-        mathjaxBlock=insertMathjaxBlock,
-        mathjaxChemistry=insertMathjaxChemistry,
-    )
+    def _init_links(self) -> None:
+        self._links: dict[str, Callable] = dict(
+            fields=Editor.onFields,
+            cards=Editor.onCardLayout,
+            bold=Editor.toggleBold,
+            italic=Editor.toggleItalic,
+            underline=Editor.toggleUnderline,
+            super=Editor.toggleSuper,
+            sub=Editor.toggleSub,
+            clear=Editor.removeFormat,
+            colour=Editor.onForeground,
+            changeCol=Editor.onChangeCol,
+            cloze=Editor.onCloze,
+            attach=Editor.onAddMedia,
+            record=Editor.onRecSound,
+            more=Editor.onAdvanced,
+            dupes=Editor.showDupes,
+            paste=Editor.onPaste,
+            cutOrCopy=Editor.onCutOrCopy,
+            htmlEdit=Editor.onHtmlEdit,
+            mathjaxInline=Editor.insertMathjaxInline,
+            mathjaxBlock=Editor.insertMathjaxBlock,
+            mathjaxChemistry=Editor.insertMathjaxChemistry,
+            toggleMathjax=Editor.toggleMathjax,
+            toggleShrinkImages=Editor.toggleShrinkImages,
+            toggleCloseHTMLTags=Editor.toggleCloseHTMLTags,
+            addImageForOcclusion=Editor.select_image_and_occlude,
+            addImageForOcclusionFromClipboard=Editor.select_image_from_clipboard_and_occlude,
+        )
 
 
 # Pasting, drag & drop, and keyboard layouts
@@ -1127,18 +1396,40 @@ uiPromise.then(noteEditor => noteEditor.toolbar.toolbar.appendGroup({{
 
 class EditorWebView(AnkiWebView):
     def __init__(self, parent: QWidget, editor: Editor) -> None:
-        AnkiWebView.__init__(self, title="editor")
+        AnkiWebView.__init__(self, kind=AnkiWebViewKind.EDITOR)
         self.editor = editor
         self.setAcceptDrops(True)
-        self._markInternal = False
+        self._store_field_content_on_next_clipboard_change = False
+        # when we detect the user copying from a field, we store the content
+        # here, and use it when they paste, so we avoid filtering field content
+        self._internal_field_text_for_paste: str | None = None
+        self._last_known_clipboard_mime: QMimeData | None = None
         clip = self.editor.mw.app.clipboard()
-        qconnect(clip.dataChanged, self._onClipboardChange)
+        clip.dataChanged.connect(self._on_clipboard_change)
         gui_hooks.editor_web_view_did_init(self)
 
-    def _onClipboardChange(self) -> None:
-        if self._markInternal:
-            self._markInternal = False
-            self._flagAnkiText()
+    def user_cut_or_copied(self) -> None:
+        self._store_field_content_on_next_clipboard_change = True
+        self._internal_field_text_for_paste = None
+
+    def _on_clipboard_change(self) -> None:
+        self._last_known_clipboard_mime = self.editor.mw.app.clipboard().mimeData()
+        if self._store_field_content_on_next_clipboard_change:
+            # if the flag was set, save the field data
+            self._internal_field_text_for_paste = self._get_clipboard_html_for_field()
+            self._store_field_content_on_next_clipboard_change = False
+        elif (
+            self._internal_field_text_for_paste != self._get_clipboard_html_for_field()
+        ):
+            # if we've previously saved the field, blank it out if the clipboard state has changed
+            self._internal_field_text_for_paste = None
+
+    def _get_clipboard_html_for_field(self):
+        clip = self.editor.mw.app.clipboard()
+        mime = clip.mimeData()
+        if not mime.hasHtml():
+            return
+        return mime.html()
 
     def onCut(self) -> None:
         self.triggerPageAction(QWebEnginePage.WebAction.Cut)
@@ -1155,12 +1446,19 @@ class EditorWebView(AnkiWebView):
         return not strip_html
 
     def _onPaste(self, mode: QClipboard.Mode) -> None:
+        # Since _on_clipboard_change doesn't always trigger properly on macOS, we do a double check if any changes were made before pasting
+        if self._last_known_clipboard_mime != self.editor.mw.app.clipboard().mimeData():
+            self._on_clipboard_change()
         extended = self._wantsExtendedPaste()
-        mime = self.editor.mw.app.clipboard().mimeData(mode=mode)
-        html, internal = self._processMime(mime, extended)
-        if not html:
-            return
-        self.editor.doPaste(html, internal, extended)
+        if html := self._internal_field_text_for_paste:
+            print("reuse internal")
+            self.editor.doPaste(html, True, extended)
+        else:
+            print("use clipboard")
+            mime = self.editor.mw.app.clipboard().mimeData(mode=mode)
+            html, internal = self._processMime(mime, extended)
+            if html:
+                self.editor.doPaste(html, internal, extended)
 
     def onPaste(self) -> None:
         self._onPaste(QClipboard.Mode.Clipboard)
@@ -1197,7 +1495,7 @@ class EditorWebView(AnkiWebView):
         # print("urls", mime.urls())
         # print("text", mime.text())
 
-        internal = mime.html().startswith("<!--anki-->")
+        internal = False
 
         mime = gui_hooks.editor_will_process_mime(
             mime, self, internal, extended, drop_event
@@ -1209,7 +1507,11 @@ class EditorWebView(AnkiWebView):
             return html_content, internal
 
         # favour url if it's a local link
-        if mime.hasUrls() and mime.urls()[0].toString().startswith("file://"):
+        if (
+            mime.hasUrls()
+            and (urls := mime.urls())
+            and urls[0].toString().startswith("file://")
+        ):
             types = (self._processUrls, self._processImage, self._processText)
         else:
             types = (self._processImage, self._processUrls, self._processText)
@@ -1228,8 +1530,9 @@ class EditorWebView(AnkiWebView):
         for qurl in mime.urls():
             url = qurl.toString()
             # chrome likes to give us the URL twice with a \n
-            url = url.splitlines()[0]
-            buf += self.editor.urlToLink(url) or ""
+            if lines := url.splitlines():
+                url = lines[0]
+                buf += self.editor.urlToLink(url)
 
         return buf
 
@@ -1247,18 +1550,12 @@ class EditorWebView(AnkiWebView):
                 if extended and token.startswith("data:image/"):
                     processed.append(self.editor.inlinedImageToLink(token))
                 elif extended and self.editor.isURL(token):
-                    # if the user is pasting an image or sound link, convert it to local
+                    # if the user is pasting an image or sound link, convert it to local, otherwise paste as a hyperlink
                     link = self.editor.urlToLink(token)
-                    if link:
-                        processed.append(link)
-                    else:
-                        # not media; add it as a normal link
-                        link = '<a href="{}">{}</a>'.format(
-                            token, html.escape(urllib.parse.unquote(token))
-                        )
-                        processed.append(link)
+                    processed.append(link)
                 else:
                     token = html.escape(token).replace("\t", " " * 4)
+
                     # if there's more than one consecutive space,
                     # use non-breaking spaces for the second one on
                     def repl(match: Match) -> str:
@@ -1275,43 +1572,10 @@ class EditorWebView(AnkiWebView):
     def _processImage(self, mime: QMimeData, extended: bool = False) -> str | None:
         if not mime.hasImage():
             return None
-        im = QImage(mime.imageData())
-        uname = namedtmp("paste")
-        if self.editor.mw.col.get_config_bool(Config.Bool.PASTE_IMAGES_AS_PNG):
-            ext = ".png"
-            im.save(uname + ext, None, 50)
-        else:
-            ext = ".jpg"
-            im.save(uname + ext, None, 80)
+        path = self.editor._read_pasted_image(mime)
+        fname = self.editor._addMedia(path)
 
-        # invalid image?
-        path = uname + ext
-        if not os.path.exists(path):
-            return None
-
-        with open(path, "rb") as file:
-            data = file.read()
-        fname = self.editor._addPastedImage(data, ext)
-        if fname:
-            return self.editor.fnameToLink(fname)
-        return None
-
-    def flagAnkiText(self) -> None:
-        # be ready to adjust when clipboard event fires
-        self._markInternal = True
-
-    def _flagAnkiText(self) -> None:
-        # add a comment in the clipboard html so we can tell text is copied
-        # from us and doesn't need to be stripped
-        clip = self.editor.mw.app.clipboard()
-        if not is_mac and not clip.ownsClipboard():
-            return
-        mime = clip.mimeData()
-        if not mime.hasHtml():
-            return
-        html = mime.html()
-        mime.setHtml(f"<!--anki-->{html}")
-        clip.setMimeData(mime)
+        return fname
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
         m = QMenu(self)
@@ -1353,14 +1617,22 @@ gui_hooks.editor_will_munge_html.append(reverse_url_quoting)
 
 
 def set_cloze_button(editor: Editor) -> None:
-    if editor.note.note_type()["type"] == MODEL_CLOZE:
-        editor.web.eval(
-            'uiPromise.then((noteEditor) => noteEditor.toolbar.templateButtons.showButton("cloze")); '
-        )
-    else:
-        editor.web.eval(
-            'uiPromise.then((noteEditor) => noteEditor.toolbar.templateButtons.hideButton("cloze")); '
-        )
+    action = "show" if editor.note.note_type()["type"] == MODEL_CLOZE else "hide"
+    editor.web.eval(
+        'require("anki/ui").loaded.then(() =>'
+        f'require("anki/NoteEditor").instances[0].toolbar.toolbar.{action}("cloze")'
+        "); "
+    )
+
+
+def set_image_occlusion_button(editor: Editor) -> None:
+    action = "show" if editor.current_notetype_is_image_occlusion() else "hide"
+    editor.web.eval(
+        'require("anki/ui").loaded.then(() =>'
+        f'require("anki/NoteEditor").instances[0].toolbar.toolbar.{action}("image-occlusion-button")'
+        "); "
+    )
 
 
 gui_hooks.editor_did_load_note.append(set_cloze_button)
+gui_hooks.editor_did_load_note.append(set_image_occlusion_button)

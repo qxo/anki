@@ -1,101 +1,184 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { on, preventDefault } from "../lib/events";
-import { registerShortcut } from "../lib/shortcuts";
-import { placeCaretAfterContent } from "../domlib/place-caret";
-import { saveSelection, restoreSelection } from "../domlib/location";
-import { isApplePlatform } from "../lib/platform";
-import { bridgeCommand } from "../lib/bridgecommand";
+import { bridgeCommand } from "@tslib/bridgecommand";
+import { getSelection } from "@tslib/cross-browser";
+import { on, preventDefault } from "@tslib/events";
+import { isApplePlatform } from "@tslib/platform";
+import { registerShortcut } from "@tslib/shortcuts";
+import type { Callback } from "@tslib/typing";
+
 import type { SelectionLocation } from "../domlib/location";
+import { restoreSelection, saveSelection } from "../domlib/location";
+import { placeCaretAfterContent } from "../domlib/place-caret";
+import { HandlerList } from "../sveltelib/handler-list";
 
-const locationEvents: (() => void)[] = [];
-
-function flushLocation(): void {
-    let removeEvent: (() => void) | undefined;
-
-    while ((removeEvent = locationEvents.pop())) {
-        removeEvent();
-    }
-}
-
+/**
+ * Workaround: If you try to invoke an IME after calling
+ * `placeCaretAfterContent` on a cE element, the IME will immediately
+ * end and the input character will be duplicated
+ */
 function safePlaceCaretAfterContent(editable: HTMLElement): void {
-    /**
-     * Workaround: If you try to invoke an IME after calling
-     * `placeCaretAfterContent` on a cE element, the IME will immediately
-     * end and the input character will be duplicated
-     */
     placeCaretAfterContent(editable);
     restoreSelection(editable, saveSelection(editable)!);
 }
 
-function onFocus(location: SelectionLocation | null): () => void {
-    return function (this: HTMLElement): void {
-        if (!location) {
-            safePlaceCaretAfterContent(this);
-            return;
-        }
+function restoreCaret(element: HTMLElement, location: SelectionLocation | null): void {
+    if (!location) {
+        return safePlaceCaretAfterContent(element);
+    }
 
-        try {
-            restoreSelection(this, location);
-        } catch {
-            safePlaceCaretAfterContent(this);
-        }
-    };
+    try {
+        restoreSelection(element, location);
+    } catch {
+        safePlaceCaretAfterContent(element);
+    }
 }
 
-function onBlur(this: HTMLElement): void {
-    prepareFocusHandling(this, saveSelection(this));
+type SetupFocusHandlerAction = (element: HTMLElement) => { destroy(): void };
+
+export interface FocusHandlerAPI {
+    /**
+     * Prevent the automatic caret restoration, that happens upon field focus
+     */
+    flushCaret(): void;
+    /**
+     * Executed upon focus event of editable.
+     */
+    focus: HandlerList<{ event: FocusEvent }>;
+    /**
+     * Executed upon blur event of editable.
+     */
+    blur: HandlerList<{ event: FocusEvent }>;
 }
 
-function prepareFocusHandling(
-    editable: HTMLElement,
-    latestLocation: SelectionLocation | null = null,
-): void {
-    const removeOnFocus = on(editable, "focus", onFocus(latestLocation), {
-        once: true,
-    });
+export function useFocusHandler(): [FocusHandlerAPI, SetupFocusHandlerAction] {
+    let latestLocation: SelectionLocation | null = null;
+    let offFocus: Callback | null;
+    let offPointerDown: Callback | null;
+    let flush = false;
 
-    locationEvents.push(
-        removeOnFocus,
-        on(editable, "pointerdown", removeOnFocus, { once: true }),
-    );
-}
+    function flushCaret(): void {
+        flush = true;
+    }
 
-export function initialFocusHandling(editable: HTMLElement): void {
-    prepareFocusHandling(editable);
-}
+    const focus = new HandlerList<{ event: FocusEvent }>();
+    const blur = new HandlerList<{ event: FocusEvent }>();
 
-/* Must execute before DOMMirror */
-export function saveLocation(editable: HTMLElement): { destroy(): void } {
-    const removeOnBlur = on(editable, "blur", onBlur);
+    function prepareFocusHandling(
+        editable: HTMLElement,
+        location: SelectionLocation | null = null,
+    ): void {
+        latestLocation = location;
 
-    return {
-        destroy() {
-            removeOnBlur();
-            flushLocation();
+        offFocus?.();
+        offFocus = on(
+            editable,
+            "focus",
+            (event: FocusEvent): void => {
+                if (flush) {
+                    flush = false;
+                } else {
+                    restoreCaret(event.currentTarget as HTMLElement, latestLocation);
+                }
+
+                focus.dispatch({ event });
+            },
+            { once: true },
+        );
+
+        offPointerDown?.();
+        offPointerDown = on(
+            editable,
+            "pointerdown",
+            () => {
+                offFocus?.();
+                offFocus = null;
+            },
+            { once: true },
+        );
+    }
+
+    /**
+     * Must execute before DOMMirror.
+     */
+    function onBlur(this: HTMLElement, event: FocusEvent): void {
+        prepareFocusHandling(this, saveSelection(this));
+        blur.dispatch({ event });
+    }
+
+    function setupFocusHandler(editable: HTMLElement): { destroy(): void } {
+        prepareFocusHandling(editable);
+        const off = on(editable, "blur", onBlur);
+
+        return {
+            destroy() {
+                off();
+                offFocus?.();
+                offPointerDown?.();
+            },
+        };
+    }
+
+    return [
+        {
+            flushCaret,
+            focus,
+            blur,
         },
-    };
+        setupFocusHandler,
+    ];
 }
 
 if (isApplePlatform()) {
     registerShortcut(() => bridgeCommand("paste"), "Control+Shift+V");
 }
 
-export function preventBuiltinContentEditableShortcuts(editable: HTMLElement): void {
-    for (const keyCombination of ["Control+B", "Control+U", "Control+I", "Control+R"]) {
-        registerShortcut(preventDefault, keyCombination, editable);
+export function preventBuiltinShortcuts(editable: HTMLElement): void {
+    for (const keyCombination of ["Control+B", "Control+U", "Control+I"]) {
+        registerShortcut(preventDefault, keyCombination, { target: editable });
     }
+}
+
+declare global {
+    interface Selection {
+        modify(s: string, t: string, u: string): void;
+    }
+}
+
+// Fix inverted Ctrl+right/left handling in RTL fields
+export function fixRTLKeyboardNav(editable: HTMLElement): void {
+    editable.addEventListener("keydown", (evt: KeyboardEvent) => {
+        if (window.getComputedStyle(editable).direction === "rtl") {
+            const selection = getSelection(editable)!;
+            let granularity = "character";
+            let alter = "move";
+            if (evt.ctrlKey) {
+                granularity = "word";
+            }
+            if (evt.shiftKey) {
+                alter = "extend";
+            }
+            if (evt.code === "ArrowRight") {
+                selection.modify(alter, "right", granularity);
+                evt.preventDefault();
+                return;
+            } else if (evt.code === "ArrowLeft") {
+                selection.modify(alter, "left", granularity);
+                evt.preventDefault();
+                return;
+            }
+        }
+    });
 }
 
 /** API */
 
 export interface ContentEditableAPI {
-    flushLocation(): void;
+    /**
+     * Can be used to turn off the caret restoring functionality of
+     * the ContentEditable. Can be used when you want to set the caret
+     * yourself.
+     */
+    focusHandler: FocusHandlerAPI;
 }
-
-const contentEditableApi: ContentEditableAPI = {
-    flushLocation,
-};
-
-export default contentEditableApi;

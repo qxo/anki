@@ -1,21 +1,26 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import type { SvelteComponentDev } from "svelte/internal";
-import { setupI18n, ModuleName } from "../lib/i18n";
-import { checkNightMode } from "../lib/nightmode";
+/* eslint
+@typescript-eslint/no-explicit-any: "off",
+ */
+
+import "./graphs-base.scss";
+
+import { ModuleName, setupI18n } from "@tslib/i18n";
+import { checkNightMode } from "@tslib/nightmode";
+import type { SvelteComponent } from "svelte";
 
 import GraphsPage from "./GraphsPage.svelte";
-import "./graphs-base.css";
 
 const i18n = setupI18n({ modules: [ModuleName.STATISTICS, ModuleName.SCHEDULING] });
 
 export async function setupGraphs(
-    graphs: typeof SvelteComponentDev[],
+    graphs: typeof SvelteComponent<any>[],
     {
         search = "deck:current",
         days = 365,
-        controller = null as typeof SvelteComponentDev | null,
+        controller = null as typeof SvelteComponent<any> | null,
     } = {},
 ): Promise<GraphsPage> {
     checkNightMode();
@@ -32,18 +37,21 @@ export async function setupGraphs(
     });
 }
 
-import TodayStats from "./TodayStats.svelte";
-import FutureDue from "./FutureDue.svelte";
-import CalendarGraph from "./CalendarGraph.svelte";
-import ReviewsGraph from "./ReviewsGraph.svelte";
-import CardCounts from "./CardCounts.svelte";
-import IntervalsGraph from "./IntervalsGraph.svelte";
-import EaseGraph from "./EaseGraph.svelte";
-import HourGraph from "./HourGraph.svelte";
-import ButtonsGraph from "./ButtonsGraph.svelte";
 import AddedGraph from "./AddedGraph.svelte";
+import ButtonsGraph from "./ButtonsGraph.svelte";
+import CalendarGraph from "./CalendarGraph.svelte";
+import CardCounts from "./CardCounts.svelte";
+import DifficultyGraph from "./DifficultyGraph.svelte";
+import EaseGraph from "./EaseGraph.svelte";
+import FutureDue from "./FutureDue.svelte";
 import { RevlogRange } from "./graph-helpers";
+import HourGraph from "./HourGraph.svelte";
+import IntervalsGraph from "./IntervalsGraph.svelte";
 import RangeBox from "./RangeBox.svelte";
+import RetrievabilityGraph from "./RetrievabilityGraph.svelte";
+import ReviewsGraph from "./ReviewsGraph.svelte";
+import StabilityGraph from "./StabilityGraph.svelte";
+import TodayStats from "./TodayStats.svelte";
 
 setupGraphs(
     [
@@ -53,7 +61,10 @@ setupGraphs(
         ReviewsGraph,
         CardCounts,
         IntervalsGraph,
+        StabilityGraph,
         EaseGraph,
+        DifficultyGraph,
+        RetrievabilityGraph,
         HourGraph,
         ButtonsGraph,
         AddedGraph,
@@ -70,7 +81,10 @@ export const graphComponents = {
     ReviewsGraph,
     CardCounts,
     IntervalsGraph,
+    StabilityGraph,
     EaseGraph,
+    DifficultyGraph,
+    RetrievabilityGraph,
     HourGraph,
     ButtonsGraph,
     AddedGraph,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import mimetypes
 import os
@@ -13,27 +14,32 @@ import time
 import traceback
 from dataclasses import dataclass
 from http import HTTPStatus
+from typing import Callable
 
 import flask
-import flask_cors  # type: ignore
-from flask import Response, request
+import flask_cors
+import stringcase
+from flask import Response, abort, request
 from waitress.server import create_server
 
 import aqt
+import aqt.main
+import aqt.operations
 from anki import hooks
-from anki.cards import CardId
-from anki.collection import GraphPreferences, OpChanges
+from anki.collection import OpChanges, OpChangesOnly, Progress, SearchNode
 from anki.decks import UpdateDeckConfigs
-from anki.models import NotetypeNames
-from anki.scheduler.v3 import NextStates
-from anki.utils import dev_mode, from_json_bytes
+from anki.scheduler.v3 import SchedulingStatesWithContext, SetSchedulingStatesRequest
+from anki.utils import dev_mode
 from aqt.changenotetype import ChangeNotetypeDialog
 from aqt.deckoptions import DeckOptionsDialog
-from aqt.operations.deck import update_deck_configs
+from aqt.operations import on_op_finished
+from aqt.operations.deck import update_deck_configs as update_deck_configs_op
+from aqt.progress import ProgressUpdate
 from aqt.qt import *
+from aqt.utils import aqt_data_path, show_warning, tr
 
 app = flask.Flask(__name__, root_path="/fake")
-flask_cors.CORS(app)
+flask_cors.CORS(app, resources={r"/*": {"origins": "127.0.0.1"}})
 
 
 @dataclass
@@ -58,8 +64,24 @@ class NotFound:
 DynamicRequest = Callable[[], Response]
 
 
-class MediaServer(threading.Thread):
+class PageContext(enum.Enum):
+    UNKNOWN = 0
+    EDITOR = 1
+    REVIEWER = 2
+    # something in /_anki/pages/
+    NON_LEGACY_PAGE = 3
+    # Do not use this if you present user content (e.g. content from cards), as it's a
+    # security issue.
+    ADDON_PAGE = 4
 
+
+@dataclass
+class LegacyPage:
+    html: str
+    context: PageContext
+
+
+class MediaServer(threading.Thread):
     _ready = threading.Event()
     daemon = True
 
@@ -67,7 +89,7 @@ class MediaServer(threading.Thread):
         super().__init__()
         self.is_shutdown = False
         # map of webview ids to pages
-        self._page_html: dict[int, str] = {}
+        self._legacy_pages: dict[int, LegacyPage] = {}
 
     def run(self) -> None:
         try:
@@ -77,7 +99,7 @@ class MediaServer(threading.Thread):
             logging.getLogger("waitress").setLevel(logging.ERROR)
 
             desired_host = os.getenv("ANKI_API_HOST", "127.0.0.1")
-            desired_port = int(os.getenv("ANKI_API_PORT", "0"))
+            desired_port = int(os.getenv("ANKI_API_PORT") or 0)
             self.server = create_server(
                 app,
                 host=desired_host,
@@ -109,15 +131,26 @@ class MediaServer(threading.Thread):
         self._ready.wait()
         return int(self.server.effective_port)  # type: ignore
 
-    def set_page_html(self, id: int, html: str) -> None:
-        self._page_html[id] = html
+    def set_page_html(
+        self, id: int, html: str, context: PageContext = PageContext.UNKNOWN
+    ) -> None:
+        self._legacy_pages[id] = LegacyPage(html, context)
 
     def get_page_html(self, id: int) -> str | None:
-        return self._page_html.get(id)
+        if page := self._legacy_pages.get(id):
+            return page.html
+        else:
+            return None
+
+    def get_page_context(self, id: int) -> PageContext | None:
+        if page := self._legacy_pages.get(id):
+            return page.context
+        else:
+            return None
 
     def clear_page_html(self, id: int) -> None:
         try:
-            del self._page_html[id]
+            del self._legacy_pages[id]
         except KeyError:
             pass
 
@@ -182,7 +215,7 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
             else:
                 max_age = 60 * 60
             return flask.send_file(
-                fullpath, mimetype=mimetype, conditional=True, max_age=max_age  # type: ignore[call-arg]
+                fullpath, mimetype=mimetype, conditional=True, max_age=max_age, download_name="foo"  # type: ignore[call-arg]
             )
         else:
             print(f"Not found: {path}")
@@ -210,18 +243,14 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
 def _builtin_data(path: str) -> bytes:
     """Return data from file in aqt/data folder.
     Path must use forward slash separators."""
-    # overriden location?
-    if data_folder := os.getenv("ANKI_DATA_FOLDER"):
-        full_path = os.path.join(data_folder, path)
-        with open(full_path, "rb") as f:
-            return f.read()
-    else:
-        if is_win and not getattr(sys, "frozen", False):
-            # default Python resource loader expects backslashes on Windows
-            path = path.replace("/", "\\")
-        reader = aqt.__loader__.get_resource_reader("aqt")  # type: ignore
+    # packaged build?
+    if getattr(sys, "frozen", False):
+        reader = aqt.__loader__.get_resource_reader("_aqt")  # type: ignore
         with reader.open_resource(path) as f:
             return f.read()
+    else:
+        full_path = aqt_data_path() / ".." / path
+        return full_path.read_bytes()
 
 
 def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
@@ -232,6 +261,8 @@ def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
         data = _builtin_data(data_path)
         return Response(data, mimetype=mimetype)
     except FileNotFoundError:
+        if dev_mode:
+            print(f"404: {data_path}")
         return flask.make_response(
             f"Invalid path: {path}",
             HTTPStatus.NOT_FOUND,
@@ -254,22 +285,31 @@ def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
 
 @app.route("/<path:pathin>", methods=["GET", "POST"])
 def handle_request(pathin: str) -> Response:
-    request = _extract_request(pathin)
+    host = request.headers.get("Host", "").lower()
+    allowed_prefixes = ("127.0.0.1:", "localhost:", "[::1]:")
+    if not any(host.startswith(prefix) for prefix in allowed_prefixes):
+        # while we only bind to localhost, this request may have come from a local browser
+        # via a DNS rebinding attack; deny it unless we're doing non-local testing
+        if os.environ.get("ANKI_API_HOST") != "0.0.0.0":
+            print("deny non-local host", host)
+            abort(403)
+
+    req = _extract_request(pathin)
     if dev_mode:
         print(f"{time.time():.3f} {flask.request.method} /{pathin}")
 
-    if isinstance(request, NotFound):
-        print(request.message)
+    if isinstance(req, NotFound):
+        print(req.message)
         return flask.make_response(
             f"Invalid path: {pathin}",
             HTTPStatus.NOT_FOUND,
         )
-    elif callable(request):
-        return _handle_dynamic_request(request)
-    elif isinstance(request, BundledFileRequest):
-        return _handle_builtin_file_request(request)
-    elif isinstance(request, LocalFileRequest):
-        return _handle_local_file_request(request)
+    elif callable(req):
+        return _handle_dynamic_request(req)
+    elif isinstance(req, BundledFileRequest):
+        return _handle_builtin_file_request(req)
+    elif isinstance(req, LocalFileRequest):
+        return _handle_local_file_request(req)
     else:
         return flask.make_response(
             f"unexpected request: {pathin}",
@@ -300,7 +340,7 @@ def _extract_internal_request(
         if ext == ".css":
             additional_prefix = "css/"
         elif ext == ".js":
-            if base in ("browsersel", "jquery-ui", "jquery", "plot"):
+            if base in ("jquery-ui", "jquery", "plot"):
                 additional_prefix = "js/vendor/"
             else:
                 additional_prefix = "js/"
@@ -314,10 +354,6 @@ def _extract_internal_request(
 
         elif base == "jquery-ui":
             base = "jquery-ui.min"
-            additional_prefix = "js/vendor/"
-
-        elif base == "browsersel":
-            base = "css_browser_selector.min"
             additional_prefix = "js/vendor/"
 
     if additional_prefix:
@@ -375,40 +411,17 @@ def _extract_request(
     return LocalFileRequest(root=aqt.mw.col.media.dir(), path=path)
 
 
-def graph_data() -> bytes:
-    args = from_json_bytes(request.data)
-    return aqt.mw.col.graph_data(search=args["search"], days=args["days"])
-
-
-def graph_preferences() -> bytes:
-    return aqt.mw.col.get_graph_preferences()
-
-
-def set_graph_preferences() -> None:
-    prefs = GraphPreferences()
-    prefs.ParseFromString(request.data)
-    aqt.mw.col.set_graph_preferences(prefs)
-
-
 def congrats_info() -> bytes:
     if not aqt.mw.col.sched._is_finished():
         aqt.mw.taskman.run_on_main(lambda: aqt.mw.moveToState("review"))
-    return aqt.mw.col.congrats_info()
+    return raw_backend_request("congrats_info")()
 
 
-def i18n_resources() -> bytes:
-    args = from_json_bytes(request.data)
-    return aqt.mw.col.i18n_resources(modules=args["modules"])
+def get_deck_configs_for_update() -> bytes:
+    return aqt.mw.col._backend.get_deck_configs_for_update_raw(request.data)
 
 
-def deck_configs_for_update() -> bytes:
-    args = from_json_bytes(request.data)
-    msg = aqt.mw.col.decks.get_deck_configs_for_update(deck_id=args["deckId"])
-    msg.have_addons = aqt.mw.addonManager.dirty
-    return msg.SerializeToString()
-
-
-def update_deck_configs_request() -> bytes:
+def update_deck_configs() -> bytes:
     # the regular change tracking machinery expects to be started on the main
     # thread and uses a callback on success, so we need to run this op on
     # main, and return immediately from the web request
@@ -416,44 +429,111 @@ def update_deck_configs_request() -> bytes:
     input = UpdateDeckConfigs()
     input.ParseFromString(request.data)
 
+    def on_progress(progress: Progress, update: ProgressUpdate) -> None:
+        if progress.HasField("compute_memory"):
+            val = progress.compute_memory
+            update.max = val.total_cards
+            update.value = val.current_cards
+            update.label = val.label
+        elif progress.HasField("compute_weights"):
+            val2 = progress.compute_weights
+            update.max = val2.total
+            update.value = val2.current
+            pct = str(int(val2.current / val2.total * 100) if val2.total > 0 else 0)
+            label = tr.deck_config_optimizing_preset(
+                current_count=val2.current_preset, total_count=val2.total_presets
+            )
+            update.label = (
+                label
+                + "\n"
+                + tr.deck_config_percent_of_reviews(pct=pct, reviews=val2.fsrs_items)
+            )
+        else:
+            return
+        if update.user_wants_abort:
+            update.abort = True
+
     def on_success(changes: OpChanges) -> None:
         if isinstance(window := aqt.mw.app.activeWindow(), DeckOptionsDialog):
             window.reject()
 
     def handle_on_main() -> None:
-        update_deck_configs(parent=aqt.mw, input=input).success(
+        update_deck_configs_op(parent=aqt.mw, input=input).success(
             on_success
-        ).run_in_background()
+        ).with_backend_progress(on_progress).run_in_background()
 
     aqt.mw.taskman.run_on_main(handle_on_main)
     return b""
 
 
-def next_card_states() -> bytes:
-    if states := aqt.mw.reviewer.get_next_states():
-        return states.SerializeToString()
-    else:
-        return b""
+def get_scheduling_states_with_context() -> bytes:
+    return SchedulingStatesWithContext(
+        states=aqt.mw.reviewer.get_scheduling_states(),
+        context=aqt.mw.reviewer.get_scheduling_context(),
+    ).SerializeToString()
 
 
-def set_next_card_states() -> bytes:
-    key = request.headers.get("key", "")
-    input = NextStates()
-    input.ParseFromString(request.data)
-    aqt.mw.reviewer.set_next_states(key, input)
+def set_scheduling_states() -> bytes:
+    states = SetSchedulingStatesRequest()
+    states.ParseFromString(request.data)
+    aqt.mw.reviewer.set_scheduling_states(states)
     return b""
 
 
-def notetype_names() -> bytes:
-    msg = NotetypeNames(entries=aqt.mw.col.models.all_names_and_ids())
-    return msg.SerializeToString()
+def import_done() -> bytes:
+    def update_window_modality() -> None:
+        if window := aqt.mw.app.activeWindow():
+            from aqt.import_export.import_dialog import ImportDialog
+
+            if isinstance(window, ImportDialog):
+                window.hide()
+                window.setWindowModality(Qt.WindowModality.NonModal)
+                window.show()
+
+    aqt.mw.taskman.run_on_main(update_window_modality)
+    return b""
 
 
-def change_notetype_info() -> bytes:
-    args = from_json_bytes(request.data)
-    return aqt.mw.col.models.change_notetype_info(
-        old_notetype_id=args["oldNotetypeId"], new_notetype_id=args["newNotetypeId"]
-    )
+def import_request(endpoint: str) -> bytes:
+    output = raw_backend_request(endpoint)()
+    response = OpChangesOnly()
+    response.ParseFromString(output)
+
+    def handle_on_main() -> None:
+        window = aqt.mw.app.activeWindow()
+        on_op_finished(aqt.mw, response, window)
+
+    aqt.mw.taskman.run_on_main(handle_on_main)
+
+    return output
+
+
+def import_csv() -> bytes:
+    return import_request("import_csv")
+
+
+def import_anki_package() -> bytes:
+    return import_request("import_anki_package")
+
+
+def import_json_file() -> bytes:
+    return import_request("import_json_file")
+
+
+def import_json_string() -> bytes:
+    return import_request("import_json_string")
+
+
+def search_in_browser() -> bytes:
+    node = SearchNode()
+    node.ParseFromString(request.data)
+
+    def handle_on_main() -> None:
+        aqt.dialogs.open("Browser", aqt.mw, search=(node,))
+
+    aqt.mw.taskman.run_on_main(handle_on_main)
+
+    return b""
 
 
 def change_notetype() -> bytes:
@@ -468,31 +548,75 @@ def change_notetype() -> bytes:
     return b""
 
 
-def complete_tag() -> bytes:
-    return aqt.mw.col.tags.complete_tag(request.data)
+post_handler_list = [
+    congrats_info,
+    get_deck_configs_for_update,
+    update_deck_configs,
+    get_scheduling_states_with_context,
+    set_scheduling_states,
+    change_notetype,
+    import_done,
+    import_csv,
+    import_anki_package,
+    import_json_file,
+    import_json_string,
+    search_in_browser,
+]
 
 
-def card_stats() -> bytes:
-    args = from_json_bytes(request.data)
-    return aqt.mw.col.card_stats_data(CardId(args["cardId"]))
+exposed_backend_list = [
+    # CollectionService
+    "latest_progress",
+    # DeckService
+    "get_deck_names",
+    # I18nService
+    "i18n_resources",
+    # ImportExportService
+    "get_csv_metadata",
+    "get_import_anki_package_presets",
+    # NotesService
+    "get_field_names",
+    "get_note",
+    # NotetypesService
+    "get_notetype_names",
+    "get_change_notetype_info",
+    # StatsService
+    "card_stats",
+    "graphs",
+    "get_graph_preferences",
+    "set_graph_preferences",
+    # TagsService
+    "complete_tag",
+    # ImageOcclusionService
+    "get_image_for_occlusion",
+    "add_image_occlusion_note",
+    "get_image_occlusion_note",
+    "update_image_occlusion_note",
+    "get_image_occlusion_fields",
+    # SchedulerService
+    "compute_fsrs_weights",
+    "compute_optimal_retention",
+    "set_wants_abort",
+    "evaluate_weights",
+    "get_optimal_retention_parameters",
+]
 
 
-# these require a collection
+def raw_backend_request(endpoint: str) -> Callable[[], bytes]:
+    # check for key at startup
+    from anki._backend import RustBackend
+
+    assert hasattr(RustBackend, f"{endpoint}_raw")
+
+    return lambda: getattr(aqt.mw.col._backend, f"{endpoint}_raw")(request.data)
+
+
+# all methods in here require a collection
 post_handlers = {
-    "graphData": graph_data,
-    "graphPreferences": graph_preferences,
-    "setGraphPreferences": set_graph_preferences,
-    "deckConfigsForUpdate": deck_configs_for_update,
-    "updateDeckConfigs": update_deck_configs_request,
-    "nextCardStates": next_card_states,
-    "setNextCardStates": set_next_card_states,
-    "changeNotetypeInfo": change_notetype_info,
-    "notetypeNames": notetype_names,
-    "changeNotetype": change_notetype,
-    "i18nResources": i18n_resources,
-    "congratsInfo": congrats_info,
-    "completeTag": complete_tag,
-    "cardStats": card_stats,
+    stringcase.camelcase(handler.__name__): handler for handler in post_handler_list
+} | {
+    stringcase.camelcase(handler): raw_backend_request(handler)
+    for handler in exposed_backend_list
 }
 
 
@@ -508,9 +632,11 @@ def _extract_collection_post_request(path: str) -> DynamicRequest | NotFound:
                     response.headers["Content-Type"] = "application/binary"
                 else:
                     response = flask.make_response("", HTTPStatus.NO_CONTENT)
-            except:
+            except Exception as exc:
                 print(traceback.format_exc())
-                response = flask.make_response("", HTTPStatus.INTERNAL_SERVER_ERROR)
+                response = flask.make_response(
+                    str(exc), HTTPStatus.INTERNAL_SERVER_ERROR
+                )
             return response
 
         return wrapped
@@ -518,9 +644,44 @@ def _extract_collection_post_request(path: str) -> DynamicRequest | NotFound:
         return NotFound(message=f"{path} not found")
 
 
-def _handle_dynamic_request(request: DynamicRequest) -> Response:
+def _check_dynamic_request_permissions():
+    if request.method == "GET":
+        return
+    context = _extract_page_context()
+
+    def warn() -> None:
+        show_warning(
+            "Unexpected API access. Please report this message on the Anki forums."
+        )
+
+    # check content type header to ensure this isn't an opaque request from another origin
+    if request.headers["Content-type"] != "application/binary":
+        aqt.mw.taskman.run_on_main(warn)
+        abort(403)
+
+    if (
+        context == PageContext.NON_LEGACY_PAGE
+        or context == PageContext.EDITOR
+        or context == PageContext.ADDON_PAGE
+    ):
+        pass
+    elif context == PageContext.REVIEWER and request.path in (
+        "/_anki/getSchedulingStatesWithContext",
+        "/_anki/setSchedulingStates",
+    ):
+        # reviewer is only allowed to access custom study methods
+        pass
+    else:
+        # other legacy pages may contain third-party JS, so we do not
+        # allow them to access our API
+        aqt.mw.taskman.run_on_main(warn)
+        abort(403)
+
+
+def _handle_dynamic_request(req: DynamicRequest) -> Response:
+    _check_dynamic_request_permissions()
     try:
-        return request()
+        return req()
     except Exception as e:
         return flask.make_response(str(e), HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -531,6 +692,21 @@ def legacy_page_data() -> Response:
         return Response(html, mimetype="text/html")
     else:
         return flask.make_response("page not found", HTTPStatus.NOT_FOUND)
+
+
+def _extract_page_context() -> PageContext:
+    "Get context based on referer header."
+    from urllib.parse import parse_qs, urlparse
+
+    referer = urlparse(request.headers.get("Referer", ""))
+    if referer.path.startswith("/_anki/pages/"):
+        return PageContext.NON_LEGACY_PAGE
+    elif referer.path == "/_anki/legacyPageData":
+        query_params = parse_qs(referer.query)
+        id = int(query_params.get("id", [None])[0])
+        return aqt.mw.mediaServer.get_page_context(id)
+    else:
+        return PageContext.UNKNOWN
 
 
 # this currently only handles a single method; in the future, idempotent

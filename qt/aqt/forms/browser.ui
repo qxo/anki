@@ -26,13 +26,13 @@
      <number>12</number>
     </property>
     <property name="leftMargin">
-     <number>12</number>
+     <number>0</number>
     </property>
     <property name="topMargin">
      <number>6</number>
     </property>
     <property name="rightMargin">
-     <number>12</number>
+     <number>6</number>
     </property>
     <property name="bottomMargin">
      <number>12</number>
@@ -46,7 +46,7 @@
        </sizepolicy>
       </property>
       <property name="orientation">
-       <enum>Qt::Vertical</enum>
+       <enum>Qt::Horizontal</enum>
       </property>
       <widget class="QWidget" name="widget" native="true">
        <property name="sizePolicy">
@@ -209,7 +209,7 @@
      <x>0</x>
      <y>0</y>
      <width>750</width>
-     <height>22</height>
+     <height>23</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuEdit">
@@ -218,8 +218,6 @@
     </property>
     <addaction name="actionUndo"/>
     <addaction name="actionRedo"/>
-    <addaction name="separator"/>
-    <addaction name="action_toggle_mode"/>
     <addaction name="separator"/>
     <addaction name="actionSelectAll"/>
     <addaction name="actionSelectNotes"/>
@@ -273,6 +271,7 @@
     <addaction name="actionReposition"/>
     <addaction name="separator"/>
     <addaction name="actionToggle_Suspend"/>
+    <addaction name="action_toggle_bury"/>
     <addaction name="separator"/>
     <addaction name="menuFlag"/>
     <addaction name="separator"/>
@@ -300,17 +299,36 @@
     <addaction name="separator"/>
     <addaction name="actionDelete"/>
    </widget>
+   <widget class="QMenu" name="menuqt_accel_view">
+    <property name="title">
+     <string>qt_accel_view</string>
+    </property>
+    <widget class="QMenu" name="menuLayout">
+     <property name="title">
+      <string>qt_accel_layout</string>
+     </property>
+     <addaction name="actionLayoutAuto"/>
+     <addaction name="separator"/>
+     <addaction name="actionLayoutVertical"/>
+     <addaction name="actionLayoutHorizontal"/>
+    </widget>
+    <addaction name="action_toggle_mode"/>
+    <addaction name="separator"/>
+    <addaction name="actionFullScreen"/>
+    <addaction name="separator"/>
+    <addaction name="actionZoomIn"/>
+    <addaction name="actionZoomOut"/>
+    <addaction name="actionResetZoom"/>
+    <addaction name="separator"/>
+    <addaction name="menuLayout"/>
+   </widget>
    <addaction name="menuEdit"/>
+   <addaction name="menuqt_accel_view"/>
    <addaction name="menu_Notes"/>
    <addaction name="menu_Cards"/>
    <addaction name="menuJump"/>
    <addaction name="menu_Help"/>
   </widget>
-  <action name="actionReschedule">
-   <property name="text">
-    <string notr="true">QT_ACCEL_RESCHEDULE</string>
-   </property>
-  </action>
   <action name="actionSelectAll">
    <property name="text">
     <string>qt_accel_select_all</string>
@@ -618,7 +636,7 @@
     <string>browsing_toggle_showing_cards_notes</string>
    </property>
    <property name="shortcut">
-    <string notr="true">Alt+T</string>
+    <string notr="true">Ctrl+Alt+T</string>
    </property>
   </action>
   <action name="actionRedo">
@@ -668,6 +686,69 @@
    </property>
    <property name="shortcut">
     <string notr="true">Ctrl+Alt+E</string>
+   </property>
+  </action>
+  <action name="actionFullScreen">
+   <property name="text">
+    <string>qt_accel_full_screen</string>
+   </property>
+  </action>
+  <action name="actionZoomIn">
+   <property name="text">
+    <string>qt_accel_zoom_editor_in</string>
+   </property>
+  </action>
+  <action name="actionZoomOut">
+   <property name="text">
+    <string>qt_accel_zoom_editor_out</string>
+   </property>
+  </action>
+  <action name="actionResetZoom">
+   <property name="text">
+    <string>qt_accel_reset_zoom</string>
+   </property>
+   <property name="shortcut">
+    <string notr="true">Ctrl+0</string>
+   </property>
+  </action>
+  <action name="actionLayoutAuto">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>qt_accel_layout_auto</string>
+   </property>
+  </action>
+  <action name="actionLayoutVertical">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>qt_accel_layout_vertical</string>
+   </property>
+  </action>
+  <action name="actionLayoutHorizontal">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>qt_accel_layout_horizontal</string>
+   </property>
+  </action>
+  <action name="actionbrowsing_toggle_showing_cards_notes">
+   <property name="text">
+    <string>browsing_toggle_showing_cards_notes</string>
+   </property>
+  </action>
+  <action name="action_toggle_bury">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>browsing_toggle_bury</string>
+   </property>
+   <property name="shortcut">
+    <string notr="true">Ctrl+Shift+J</string>
    </property>
   </action>
  </widget>

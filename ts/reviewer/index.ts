@@ -5,23 +5,23 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-// This file currently fails compat check due to Promise.allSettled(). Once
-// the minimum iOS version is bumped to iOS 13, we should remove this.
-/* eslint
-compat/compat: "off",
- */
-
-import "css-browser-selector/css_browser_selector.min";
-
 export { default as $, default as jQuery } from "jquery/dist/jquery";
 
+import { imageOcclusionAPI } from "../image-occlusion/review";
 import { mutateNextCardStates } from "./answering";
+import { addBrowserClasses } from "./browser_selector";
+
 globalThis.anki = globalThis.anki || {};
 globalThis.anki.mutateNextCardStates = mutateNextCardStates;
+globalThis.anki.imageOcclusion = imageOcclusionAPI;
+globalThis.anki.setupImageCloze = imageOcclusionAPI.setup; // deprecated
 
-import { bridgeCommand } from "../lib/bridgecommand";
+import { bridgeCommand } from "@tslib/bridgecommand";
+import { registerPackage } from "@tslib/runtime-require";
+
 import { allImagesLoaded, preloadAnswerImages } from "./images";
-import { maybePreloadExternalCss } from "./css";
+import { preloadResources } from "./preload";
+
 declare const MathJax: any;
 
 type Callback = () => void | Promise<void>;
@@ -104,21 +104,19 @@ async function setInnerHTML(element: Element, html: string): Promise<void> {
     }
 }
 
-const renderError =
-    (type: string) =>
-    (error: unknown): string => {
-        const errorMessage = String(error).substring(0, 2000);
-        let errorStack: string;
-        if (error instanceof Error) {
-            errorStack = String(error.stack).substring(0, 2000);
-        } else {
-            errorStack = "";
-        }
-        return `<div>Invalid ${type} on card: ${errorMessage}\n${errorStack}</div>`.replace(
-            /\n/g,
-            "<br>",
-        );
-    };
+const renderError = (type: string) => (error: unknown): string => {
+    const errorMessage = String(error).substring(0, 2000);
+    let errorStack: string;
+    if (error instanceof Error) {
+        errorStack = String(error.stack).substring(0, 2000);
+    } else {
+        errorStack = "";
+    }
+    return `<div>Invalid ${type} on card: ${errorMessage}\n${errorStack}</div>`.replace(
+        /\n/g,
+        "<br>",
+    );
+};
 
 export async function _updateQA(
     html: string,
@@ -134,8 +132,7 @@ export async function _updateQA(
 
     const qa = document.getElementById("qa")!;
 
-    // prevent flash of unstyled content when external css used
-    await maybePreloadExternalCss(html);
+    await preloadResources(html);
 
     qa.style.opacity = "0";
 
@@ -146,6 +143,9 @@ export async function _updateQA(
     }
 
     await _runHook(onUpdateHook);
+
+    // dynamic toolbar background
+    bridgeCommand("updateToolbar");
 
     // wait for mathjax to ready
     await MathJax.startup.promise
@@ -167,22 +167,22 @@ export function _showQuestion(q: string, a: string, bodyclass: string): void {
         _updateQA(
             q,
             null,
-            function () {
+            function() {
                 // return to top of window
                 window.scrollTo(0, 0);
 
                 document.body.className = bodyclass;
             },
-            function () {
+            function() {
                 // focus typing area if visible
                 typeans = document.getElementById("typeans") as HTMLInputElement;
                 if (typeans) {
                     typeans.focus();
                 }
                 // preload images
-                allImagesLoaded().then(() => preloadAnswerImages(q, a));
+                allImagesLoaded().then(() => preloadAnswerImages(a));
             },
-        ),
+        )
     );
 }
 
@@ -195,7 +195,7 @@ export function _showAnswer(a: string, bodyclass: string): void {
         _updateQA(
             a,
             null,
-            function () {
+            function() {
                 if (bodyclass) {
                     //  when previewing
                     document.body.className = bodyclass;
@@ -204,17 +204,17 @@ export function _showAnswer(a: string, bodyclass: string): void {
                 // avoid scrolling to the answer until images load
                 allImagesLoaded().then(scrollToAnswer);
             },
-            function () {
+            function() {
                 /* noop */
             },
-        ),
+        )
     );
 }
 
 export function _drawFlag(flag: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7): void {
     const elem = document.getElementById("_flag")!;
     elem.toggleAttribute("hidden", flag === 0);
-    elem.style.color = `var(--flag${flag}-fg)`;
+    elem.style.color = `var(--flag-${flag})`;
 }
 
 export function _drawMark(mark: boolean): void {
@@ -231,3 +231,46 @@ export function _typeAnsPress(): void {
 export function _emulateMobile(enabled: boolean): void {
     document.documentElement.classList.toggle("mobile", enabled);
 }
+
+// Block Qt's default drag & drop behavior by default
+export function _blockDefaultDragDropBehavior(): void {
+    function handler(evt: DragEvent) {
+        evt.preventDefault();
+    }
+    document.ondragenter = handler;
+    document.ondragover = handler;
+    document.ondrop = handler;
+}
+
+// work around WebEngine/IME bug in Qt6
+// https://github.com/ankitects/anki/issues/1952
+const dummyButton = document.createElement("button");
+dummyButton.style.position = "absolute";
+dummyButton.style.opacity = "0";
+document.addEventListener("focusout", (event) => {
+    // Prevent type box from losing focus when switching IMEs
+    if (!document.hasFocus()) {
+        return;
+    }
+
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        dummyButton.style.left = `${window.scrollX}px`;
+        dummyButton.style.top = `${window.scrollY}px`;
+        document.body.appendChild(dummyButton);
+        dummyButton.focus();
+        document.body.removeChild(dummyButton);
+    }
+});
+
+addBrowserClasses();
+
+registerPackage("anki/reviewer", {
+    // If you append a function to this each time the question or answer
+    // is shown, it will be called before MathJax has been rendered.
+    onUpdateHook,
+    // If you append a function to this each time the question or answer
+    // is shown, it will be called after images have been preloaded and
+    // MathJax has been rendered.
+    onShownHook,
+});

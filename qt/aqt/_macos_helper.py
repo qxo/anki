@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import os
 import sys
-from ctypes import CDLL, CFUNCTYPE, c_char_p
+from ctypes import CDLL, CFUNCTYPE, c_bool, c_char_p
 from typing import Callable
 
 import aqt
+import aqt.utils
 
 
 class _MacOSHelper:
@@ -21,6 +22,7 @@ class _MacOSHelper:
             )
 
         self._dll = CDLL(path)
+        self._dll.system_is_dark.restype = c_bool
 
     def system_is_dark(self) -> bool:
         return self._dll.system_is_dark()

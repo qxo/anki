@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any, Callable, Sequence
 
 import aqt
+import aqt.browser
 import aqt.forms
 from anki.cards import Card, CardId
 from anki.collection import Collection, Config, OpChanges
 from anki.consts import *
 from anki.notes import Note, NoteId
-from anki.utils import is_win
-from aqt import colors, gui_hooks
+from aqt import gui_hooks
 from aqt.browser.table import Columns, ItemId, SearchContext
 from aqt.browser.table.model import DataModel
 from aqt.browser.table.state import CardState, ItemState, NoteState
@@ -39,6 +39,7 @@ class Table:
             else CardState(self.col)
         )
         self._model = DataModel(
+            self.browser,
             self.col,
             self._state,
             self._on_row_state_will_change,
@@ -59,7 +60,6 @@ class Table:
 
     def cleanup(self) -> None:
         self._save_header()
-        gui_hooks.theme_did_change.remove(self._setup_style)
 
     # Public Methods
     ######################################################################
@@ -132,12 +132,14 @@ class Table:
             | QItemSelectionModel.SelectionFlag.Rows,
         )
 
-    def select_single_card(self, card_id: CardId) -> None:
+    def select_single_card(
+        self, card_id: CardId, scroll_even_if_visible: bool = True
+    ) -> None:
         """Try to set the selection to the item corresponding to the given card."""
         self._reset_selection()
         if (row := self._model.get_card_row(card_id)) is not None:
             self._view.selectRow(row)
-            self._scroll_to_row(row, scroll_even_if_visible=True)
+            self._scroll_to_row(row, scroll_even_if_visible)
         else:
             self.browser.on_all_or_selected_rows_changed()
             self.browser.on_current_row_changed()
@@ -223,7 +225,7 @@ class Table:
         bottom = max(r.row() for r in self._selected()) + 1
         for row in range(bottom, self.len()):
             index = self._model.index(row, 0)
-            if self._model.get_row(index).is_deleted:
+            if self._model.get_row(index).is_disabled:
                 continue
             if self._model.get_note_id(index) in nids:
                 continue
@@ -233,7 +235,7 @@ class Table:
         top = min(r.row() for r in self._selected()) - 1
         for row in range(top, -1, -1):
             index = self._model.index(row, 0)
-            if self._model.get_row(index).is_deleted:
+            if self._model.get_row(index).is_disabled:
                 continue
             if self._model.get_note_id(index) in nids:
                 continue
@@ -275,7 +277,7 @@ class Table:
 
     def _reset_selection(self) -> None:
         """Remove selection and focus without emitting signals.
-        If no selection change is triggerd afterwards, `browser.on_all_or_selected_rows_changed()`
+        If no selection change is triggered afterwards, `browser.on_all_or_selected_rows_changed()`
         and `browser.on_current_row_changed()` must be called.
         """
         self._view.selectionModel().reset()
@@ -343,10 +345,8 @@ class Table:
         self._view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._view.horizontalScrollBar().setSingleStep(10)
         self._update_font()
-        self._setup_style()
         self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         qconnect(self._view.customContextMenuRequested, self._on_context_menu)
-        gui_hooks.theme_did_change.append(self._setup_style)
 
     def _update_font(self) -> None:
         # we can't choose different line heights efficiently, so we need
@@ -359,25 +359,11 @@ class Table:
                     curmax = bsize
         self._view.verticalHeader().setDefaultSectionSize(curmax + 6)
 
-    def _setup_style(self) -> None:
-        if not theme_manager.night_mode:
-            self._view.setStyleSheet(
-                "QTableView{ selection-background-color: rgba(150, 150, 150, 50); "
-                "selection-color: black; }"
-            )
-        elif theme_manager.macos_dark_mode():
-            self._view.setStyleSheet(
-                f"QTableView {{ gridline-color: {colors.FRAME_BG} }}"
-            )
-        else:
-            self._view.setStyleSheet("")
-
     def _setup_headers(self) -> None:
         vh = self._view.verticalHeader()
         hh = self._view.horizontalHeader()
-        if not is_win:
-            vh.hide()
-            hh.show()
+        vh.hide()
+        hh.show()
         hh.setHighlightSections(False)
         hh.setMinimumSectionSize(50)
         hh.setSectionsMovable(True)
@@ -502,14 +488,15 @@ class Table:
 
     def _on_sort_column_changed(self, section: int, order: Qt.SortOrder) -> None:
         column = self._model.column_at_section(section)
-        if column.sorting == Columns.SORTING_NONE:
+        sorting = column.sorting_notes if self.is_notes_mode() else column.sorting_cards
+        if sorting is Columns.SORTING_NONE:
             showInfo(tr.browsing_sorting_on_this_column_is_not())
             self._set_sort_indicator()
             return
         if self._state.sort_column != column.key:
             self._state.sort_column = column.key
             # numeric fields default to descending
-            if column.sorting == Columns.SORTING_DESCENDING:
+            if sorting is Columns.SORTING_DESCENDING:
                 order = Qt.SortOrder.DescendingOrder
             self._state.sort_backwards = order == Qt.SortOrder.DescendingOrder
             self.browser.search()

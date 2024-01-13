@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import aqt
+import aqt.operations
 from anki.collection import OpChanges
 from anki.scheduler import UnburyDeck
 from aqt import gui_hooks
 from aqt.deckdescription import DeckDescriptionDialog
 from aqt.deckoptions import display_options_for_deck
+from aqt.operations import QueryOp
 from aqt.operations.scheduling import (
     empty_filtered_deck,
     rebuild_filtered_deck,
@@ -60,12 +62,16 @@ class Overview:
         self.refresh()
 
     def refresh(self) -> None:
-        self._refresh_needed = False
-        self.mw.col.reset()
-        self._renderPage()
-        self._renderBottom()
-        self.mw.web.setFocus()
-        gui_hooks.overview_did_refresh(self)
+        def success(_counts: tuple) -> None:
+            self._refresh_needed = False
+            self._renderPage()
+            self._renderBottom()
+            self.mw.web.setFocus()
+            gui_hooks.overview_did_refresh(self)
+
+        QueryOp(
+            parent=self.mw, op=lambda col: col.sched.counts(), success=success
+        ).run_in_background()
 
     def refresh_if_needed(self) -> None:
         if self._refresh_needed:
@@ -143,25 +149,24 @@ class Overview:
 
     def on_unbury(self) -> None:
         mode = UnburyDeck.Mode.ALL
-        if self.mw.col.sched_ver() != 1:
-            info = self.mw.col.sched.congratulations_info()
-            if info.have_sched_buried and info.have_user_buried:
-                opts = [
-                    tr.studying_manually_buried_cards(),
-                    tr.studying_buried_siblings(),
-                    tr.studying_all_buried_cards(),
-                    tr.actions_cancel(),
-                ]
+        info = self.mw.col.sched.congratulations_info()
+        if info.have_sched_buried and info.have_user_buried:
+            opts = [
+                tr.studying_manually_buried_cards(),
+                tr.studying_buried_siblings(),
+                tr.studying_all_buried_cards(),
+                tr.actions_cancel(),
+            ]
 
-                diag = askUserDialog(tr.studying_what_would_you_like_to_unbury(), opts)
-                diag.setDefault(0)
-                ret = diag.run()
-                if ret == opts[0]:
-                    mode = UnburyDeck.Mode.USER_ONLY
-                elif ret == opts[1]:
-                    mode = UnburyDeck.Mode.SCHED_ONLY
-                elif ret == opts[3]:
-                    return
+            diag = askUserDialog(tr.studying_what_would_you_like_to_unbury(), opts)
+            diag.setDefault(0)
+            ret = diag.run()
+            if ret == opts[0]:
+                mode = UnburyDeck.Mode.USER_ONLY
+            elif ret == opts[1]:
+                mode = UnburyDeck.Mode.SCHED_ONLY
+            elif ret == opts[3]:
+                return
 
         unbury_deck(
             parent=self.mw, deck_id=self.mw.col.decks.get_current_id(), mode=mode
@@ -220,25 +225,42 @@ class Overview:
 
     def _table(self) -> str | None:
         counts = list(self.mw.col.sched.counts())
+        current_did = self.mw.col.decks.get_current_id()
+        deck_node = self.mw.col.sched.deck_due_tree(current_did)
+
         but = self.mw.button
-        return """
+        if self.mw.col.v3_scheduler():
+            buried_new = deck_node.new_count - counts[0]
+            buried_learning = deck_node.learn_count - counts[1]
+            buried_review = deck_node.review_count - counts[2]
+        else:
+            buried_new = buried_learning = buried_review = 0
+        buried_label = tr.studying_counts_differ()
+
+        def number_row(title: str, klass: str, count: int, buried_count: int) -> str:
+            buried = f"{buried_count:+}" if buried_count else ""
+            return f"""
+<tr>
+    <td>{title}:</td>
+    <td>
+        <b>
+            <span class={klass}>{count}</span>
+            <span class=bury-count title="{buried_label}">{buried}</span>
+        </b>
+    </td>
+</tr>
+"""
+
+        return f"""
 <table width=400 cellpadding=5>
 <tr><td align=center valign=top>
 <table cellspacing=5>
-<tr><td>{}:</td><td><b><span class=new-count>{}</span></b></td></tr>
-<tr><td>{}:</td><td><b><span class=learn-count>{}</span></b></td></tr>
-<tr><td>{}:</td><td><b><span class=review-count>{}</span></b></td></tr>
+{number_row(tr.actions_new(), "new-count", counts[0], buried_new)}
+{number_row(tr.scheduling_learning(), "learn-count", counts[1], buried_learning)}
+{number_row(tr.studying_to_review(), "review-count", counts[2], buried_review)}
 </table>
 </td><td align=center>
-{}</td></tr></table>""".format(
-            tr.actions_new(),
-            counts[0],
-            tr.scheduling_learning(),
-            counts[1],
-            tr.studying_to_review(),
-            counts[2],
-            but("study", tr.studying_study_now(), id="study", extra=" autofocus"),
-        )
+{but("study", tr.studying_study_now(), id="study", extra=" autofocus")}</td></tr></table>"""
 
     _body = """
 <center>
@@ -259,7 +281,8 @@ class Overview:
         links = [
             ["O", "opts", tr.actions_options()],
         ]
-        if self.mw.col.decks.current()["dyn"]:
+        is_dyn = self.mw.col.decks.current()["dyn"]
+        if is_dyn:
             links.append(["R", "refresh", tr.actions_rebuild()])
             links.append(["E", "empty", tr.studying_empty()])
         else:
@@ -267,7 +290,14 @@ class Overview:
             # links.append(["F", "cram", _("Filter/Cram")])
         if self.mw.col.sched.have_buried():
             links.append(["U", "unbury", tr.studying_unbury()])
-        links.append(["", "description", tr.scheduling_description()])
+        if not is_dyn:
+            links.append(["", "description", tr.scheduling_description()])
+        link_handler = gui_hooks.overview_will_render_bottom(
+            self._linkHandler,
+            links,
+        )
+        if not callable(link_handler):
+            link_handler = self._linkHandler
         buf = ""
         for b in links:
             if b[0]:
@@ -277,7 +307,9 @@ class Overview:
                 b
             )
         self.bottom.draw(
-            buf=buf, link_handler=self._linkHandler, web_context=OverviewBottomBar(self)
+            buf=buf,
+            link_handler=link_handler,
+            web_context=OverviewBottomBar(self),
         )
 
     # Studying more
@@ -286,4 +318,4 @@ class Overview:
     def onStudyMore(self) -> None:
         import aqt.customstudy
 
-        aqt.customstudy.CustomStudy(self.mw)
+        aqt.customstudy.CustomStudy.fetch_data_and_show(self.mw)

@@ -1,23 +1,25 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter;
 
 use prost::Message;
-use rusqlite::{named_params, params, Row};
+use rusqlite::named_params;
+use rusqlite::params;
+use rusqlite::Row;
 use unicase::UniCase;
 
 use super::SqliteStorage;
-use crate::{
-    card::CardQueue,
-    config::SchedulerVersion,
-    decks::{immediate_parent_name, DeckCommon, DeckKindContainer, DeckSchema11, DueCounts},
-    error::DbErrorKind,
-    prelude::*,
-};
+use crate::card::CardQueue;
+use crate::decks::immediate_parent_name;
+use crate::decks::DeckCommon;
+use crate::decks::DeckKindContainer;
+use crate::decks::DeckSchema11;
+use crate::decks::DueCounts;
+use crate::error::DbErrorKind;
+use crate::prelude::*;
 
 fn row_to_deck(row: &Row) -> Result<Deck> {
     let common = DeckCommon::decode(row.get_ref_unwrap(4).as_blob()?)?;
@@ -74,6 +76,15 @@ impl SqliteStorage {
             .transpose()
     }
 
+    pub(crate) fn get_deck_by_name(&self, machine_name: &str) -> Result<Option<Deck>> {
+        self.db
+            .prepare_cached(concat!(include_str!("get_deck.sql"), " WHERE name = ?"))?
+            .query_and_then([machine_name], row_to_deck)?
+            .next()
+            .transpose()
+            .map_err(Into::into)
+    }
+
     pub(crate) fn get_all_decks(&self) -> Result<Vec<Deck>> {
         self.db
             .prepare(include_str!("get_deck.sql"))?
@@ -111,9 +122,40 @@ impl SqliteStorage {
             .map_err(Into::into)
     }
 
+    pub(crate) fn get_decks_for_search_cards(&self) -> Result<Vec<Deck>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get_deck.sql"),
+                " WHERE id IN (SELECT DISTINCT did FROM cards WHERE id IN",
+                " (SELECT cid FROM search_cids))",
+            ))?
+            .query_and_then([], row_to_deck)?
+            .collect()
+    }
+
+    pub(crate) fn get_decks_and_original_for_search_cards(&self) -> Result<Vec<Deck>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get_deck.sql"),
+                " WHERE id IN (",
+                include_str!("all_decks_and_original_of_search_cards.sql"),
+                ")",
+            ))?
+            .query_and_then([], row_to_deck)?
+            .collect()
+    }
+
+    /// Returns the deck id of the first existing card of every searched note.
+    pub(crate) fn all_decks_of_search_notes(&self) -> Result<HashMap<NoteId, DeckId>> {
+        self.db
+            .prepare_cached(include_str!("all_decks_of_search_notes.sql"))?
+            .query_and_then([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
     // caller should ensure name unique
     pub(crate) fn add_deck(&self, deck: &mut Deck) -> Result<()> {
-        assert!(deck.id.0 == 0);
+        assert_eq!(deck.id.0, 0);
         deck.id.0 = self
             .db
             .prepare(include_str!("alloc_id.sql"))?
@@ -127,9 +169,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn update_deck(&self, deck: &Deck) -> Result<()> {
-        if deck.id.0 == 0 {
-            return Err(AnkiError::invalid_input("deck with id 0"));
-        }
+        require!(deck.id.0 != 0, "deck with id 0");
         let mut stmt = self.db.prepare_cached(include_str!("update_deck.sql"))?;
         let mut common = vec![];
         deck.common.encode(&mut common)?;
@@ -147,21 +187,14 @@ impl SqliteStorage {
             deck.id
         ])?;
 
-        if count == 0 {
-            Err(AnkiError::invalid_input(
-                "update_deck() called with non-existent deck",
-            ))
-        } else {
-            Ok(())
-        }
+        require!(count != 0, "update_deck() called with non-existent deck");
+        Ok(())
     }
 
     /// Used for syncing&undo; will keep existing ID. Shouldn't be used to add
     /// new decks locally, since it does not allocate an id.
     pub(crate) fn add_or_update_deck_with_existing_id(&self, deck: &Deck) -> Result<()> {
-        if deck.id.0 == 0 {
-            return Err(AnkiError::invalid_input("deck with id 0"));
-        }
+        require!(deck.id.0 != 0, "deck with id 0");
         let mut stmt = self
             .db
             .prepare_cached(include_str!("add_or_update_deck.sql"))?;
@@ -198,13 +231,14 @@ impl SqliteStorage {
             .collect()
     }
 
+    /// Returns the descendants of the given [Deck] in preorder.
     pub(crate) fn child_decks(&self, parent: &Deck) -> Result<Vec<Deck>> {
         let prefix_start = format!("{}\x1f", parent.name);
         let prefix_end = format!("{}\x20", parent.name);
         self.db
             .prepare_cached(concat!(
                 include_str!("get_deck.sql"),
-                " where name >= ? and name < ?"
+                " where name >= ? and name < ? order by name"
             ))?
             .query_and_then([prefix_start, prefix_end], row_to_deck)?
             .collect()
@@ -222,7 +256,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn deck_with_children(&self, deck_id: DeckId) -> Result<Vec<Deck>> {
-        let deck = self.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?;
+        let deck = self.get_deck(deck_id)?.or_not_found(deck_id)?;
         let prefix_start = format!("{}\x1f", deck.name);
         let prefix_end = format!("{}\x20", deck.name);
         iter::once(Ok(deck))
@@ -237,7 +271,8 @@ impl SqliteStorage {
             .collect()
     }
 
-    /// Return the parents of `child`, with the most immediate parent coming first.
+    /// Return the parents of `child`, with the most immediate parent coming
+    /// first.
     pub(crate) fn parent_decks(&self, child: &Deck) -> Result<Vec<Deck>> {
         let mut decks: Vec<Deck> = vec![];
         while let Some(parent_name) = immediate_parent_name(
@@ -261,47 +296,20 @@ impl SqliteStorage {
 
     pub(crate) fn due_counts(
         &self,
-        sched: SchedulerVersion,
         day_cutoff: u32,
         learn_cutoff: u32,
-        top_deck: Option<&str>,
     ) -> Result<HashMap<DeckId, DueCounts>> {
-        let sched_ver = sched as u8;
-        let mut params = named_params! {
+        let params = named_params! {
             ":new_queue": CardQueue::New as u8,
             ":review_queue": CardQueue::Review as u8,
             ":day_cutoff": day_cutoff,
-            ":sched_ver": sched_ver,
             ":learn_queue": CardQueue::Learn as u8,
             ":learn_cutoff": learn_cutoff,
             ":daylearn_queue": CardQueue::DayLearn as u8,
             ":preview_queue": CardQueue::PreviewRepeat as u8,
         }
         .to_vec();
-
-        let sql;
-        let prefix_start;
-        let prefix_end;
-        let top;
-        if let Some(top_inner) = top_deck {
-            // limited to deck node
-            top = top_inner;
-            prefix_start = format!("{}\x1f", top);
-            prefix_end = format!("{}\x20", top);
-            params.extend(named_params! {
-                ":top_deck": top,
-                ":prefix_start": prefix_start,
-                ":prefix_end": prefix_end,
-            });
-            sql = concat!(
-                include_str!("due_counts.sql"),
-                " where did in (select id from decks where name = :top_deck ",
-                "or (name >= :prefix_start and name < :prefix_end)) group by did "
-            );
-        } else {
-            // entire tree
-            sql = concat!(include_str!("due_counts.sql"), " group by did");
-        }
+        let sql = concat!(include_str!("due_counts.sql"), " group by did");
 
         self.db
             .prepare_cached(sql)?
@@ -351,6 +359,13 @@ impl SqliteStorage {
         Ok(())
     }
 
+    pub(crate) fn get_active_deck_ids_sorted(&self) -> Result<Vec<DeckId>> {
+        self.db
+            .prepare_cached(include_str!("active_deck_ids_sorted.sql"))?
+            .query_and_then([], |row| row.get(0).map_err(Into::into))?
+            .collect()
+    }
+
     // Upgrading/downgrading/legacy
 
     pub(super) fn add_default_deck(&self, tr: &I18n) -> Result<()> {
@@ -365,7 +380,9 @@ impl SqliteStorage {
         let usn = self.usn(server)?;
         let decks = self
             .get_schema11_decks()
-            .map_err(|e| AnkiError::JsonError(format!("decoding decks: {}", e)))?;
+            .map_err(|e| AnkiError::JsonError {
+                info: format!("decoding decks: {}", e),
+            })?;
         let mut names = HashSet::new();
         for (_id, deck) in decks {
             let oldname = deck.name().to_string();

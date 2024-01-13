@@ -1,19 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ops::Deref;
 
 use itertools::Itertools;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
 
 use super::Notetype;
-use crate::{
-    cloze::add_cloze_numbers_in_string, notetype::NotetypeKind, prelude::*,
-    template::ParsedTemplate,
-};
+use crate::cloze::add_cloze_numbers_in_string;
+use crate::notetype::NotetypeKind;
+use crate::prelude::*;
+use crate::template::ParsedTemplate;
 
 /// Info about an existing card required when generating new cards
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AlreadyGeneratedCardInfo {
     pub id: CardId,
     pub nid: NoteId,
@@ -36,11 +40,11 @@ pub(crate) struct SingleCardGenContext {
     target_deck_id: Option<DeckId>,
 }
 
-/// Info required to determine which cards should be generated when note added/updated,
-/// and where they should be placed.
-pub(crate) struct CardGenContext<'a> {
+/// Info required to determine which cards should be generated when note
+/// added/updated, and where they should be placed.
+pub(crate) struct CardGenContext<N: Deref<Target = Notetype>> {
     pub usn: Usn,
-    pub notetype: &'a Notetype,
+    pub notetype: N,
     /// The last deck that was added to with this note type
     pub last_deck: Option<DeckId>,
     cards: Vec<SingleCardGenContext>,
@@ -53,25 +57,27 @@ pub(crate) struct CardGenCache {
     deck_configs: HashMap<DeckId, DeckConfig>,
 }
 
-impl CardGenContext<'_> {
-    pub(crate) fn new(nt: &Notetype, last_deck: Option<DeckId>, usn: Usn) -> CardGenContext<'_> {
+impl<N: Deref<Target = Notetype>> CardGenContext<N> {
+    pub(crate) fn new(nt: N, last_deck: Option<DeckId>, usn: Usn) -> CardGenContext<N> {
+        let cards = nt
+            .templates
+            .iter()
+            .map(|tmpl| SingleCardGenContext {
+                template: tmpl.parsed_question(),
+                target_deck_id: tmpl.target_deck_id(),
+            })
+            .collect();
         CardGenContext {
             usn,
             last_deck,
             notetype: nt,
-            cards: nt
-                .templates
-                .iter()
-                .map(|tmpl| SingleCardGenContext {
-                    template: tmpl.parsed_question(),
-                    target_deck_id: tmpl.target_deck_id(),
-                })
-                .collect(),
+            cards,
         }
     }
 
-    /// If template[ord] generates a non-empty question given nonempty_fields, return the provided
-    /// deck id, or an overriden one. If question is empty, return None.
+    /// If template[ord] generates a non-empty question given nonempty_fields,
+    /// return the provided deck id, or an overridden one. If question is
+    /// empty, return None.
     fn is_nonempty(&self, card_ord: usize, nonempty_fields: &HashSet<&str>) -> bool {
         let card = &self.cards[card_ord];
         let template = match card.template {
@@ -174,7 +180,7 @@ pub(super) fn group_generated_cards_by_note(
     out
 }
 
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub(crate) struct ExtractedCardInfo {
     // if set, the due position new cards should be given
     pub due: Option<u32>,
@@ -209,7 +215,7 @@ pub(crate) fn extract_data_from_existing_cards(
 impl Collection {
     pub(crate) fn generate_cards_for_new_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
         target_deck_id: DeckId,
     ) -> Result<()> {
@@ -224,7 +230,7 @@ impl Collection {
 
     pub(crate) fn generate_cards_for_existing_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
     ) -> Result<()> {
         let existing = self.storage.existing_cards_for_note(note.id)?;
@@ -233,7 +239,7 @@ impl Collection {
 
     fn generate_cards_for_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
         existing: &[AlreadyGeneratedCardInfo],
         target_deck_id: Option<DeckId>,
@@ -246,7 +252,10 @@ impl Collection {
         self.add_generated_cards(note.id, &cards, target_deck_id, cache)
     }
 
-    pub(crate) fn generate_cards_for_notetype(&mut self, ctx: &CardGenContext) -> Result<()> {
+    pub(crate) fn generate_cards_for_notetype(
+        &mut self,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
+    ) -> Result<()> {
         let existing_cards = self.storage.existing_cards_for_notetype(ctx.notetype.id)?;
         let by_note = group_generated_cards_by_note(existing_cards);
         let mut cache = CardGenCache::default();
@@ -318,7 +327,8 @@ impl Collection {
         }
     }
 
-    /// If deck ID does not exist or points to a filtered deck, fall back on default.
+    /// If deck ID does not exist or points to a filtered deck, fall back on
+    /// default.
     fn deck_for_adding(&mut self, did: Option<DeckId>) -> Result<(DeckId, DeckConfigId)> {
         if let Some(did) = did {
             if let Some(deck) = self.deck_conf_if_normal(did)? {
@@ -332,7 +342,7 @@ impl Collection {
     fn default_deck_conf(&mut self) -> Result<(DeckId, DeckConfigId)> {
         // currently hard-coded to 1, we could create this as needed in the future
         self.deck_conf_if_normal(DeckId(1))?
-            .ok_or_else(|| AnkiError::invalid_input("invalid default deck"))
+            .or_invalid("invalid default deck")
     }
 
     /// If deck exists and and is a normal deck, return its ID and config
@@ -345,7 +355,7 @@ impl Collection {
 
 fn random_position(highest_position: u32) -> u32 {
     let mut rng = StdRng::seed_from_u64(highest_position as u64);
-    rng.gen_range(0..highest_position.max(1000))
+    rng.gen_range(1..highest_position.max(1000))
 }
 
 #[cfg(test)]
@@ -355,8 +365,8 @@ mod test {
     #[test]
     fn random() {
         // predictable output and a minimum range of 1000
-        assert_eq!(random_position(5), 179);
-        assert_eq!(random_position(500), 12);
+        assert_eq!(random_position(5), 180);
+        assert_eq!(random_position(500), 13);
         assert_eq!(random_position(5001), 3731);
     }
 }

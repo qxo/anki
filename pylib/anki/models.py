@@ -10,6 +10,8 @@ import time
 from typing import Any, NewType, Sequence, Union
 
 import anki  # pylint: disable=unused-import
+import anki.collection
+import anki.notes
 from anki import notetypes_pb2
 from anki._legacy import DeprecatedNamesMixin, deprecated, print_deprecation_warning
 from anki.collection import OpChanges, OpChangesWithId
@@ -25,6 +27,7 @@ NotetypeNameIdUseCount = notetypes_pb2.NotetypeNameIdUseCount
 NotetypeNames = notetypes_pb2.NotetypeNames
 ChangeNotetypeInfo = notetypes_pb2.ChangeNotetypeInfo
 ChangeNotetypeRequest = notetypes_pb2.ChangeNotetypeRequest
+StockNotetype = notetypes_pb2.StockNotetype
 
 # legacy types
 NotetypeDict = dict[str, Any]
@@ -41,7 +44,7 @@ class ModelsDictProxy:
 
     def _warn(self) -> None:
         print_deprecation_warning(
-            "add-on should use methods on col.decks, not col.decks.decks dict"
+            "add-on should use methods on col.models, not col.models.models dict"
         )
 
     def __getitem__(self, item: Any) -> Any:
@@ -179,7 +182,7 @@ class ModelManager(DeprecatedNamesMixin):
         "Create a new model, and return it."
         # caller should call save() after modifying
         notetype = from_json_bytes(
-            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.KIND_BASIC)
         )
         notetype["flds"] = []
         notetype["tmpls"] = []
@@ -214,11 +217,15 @@ class ModelManager(DeprecatedNamesMixin):
         if existing_id is not None and existing_id != notetype["id"]:
             notetype["name"] += f"-{checksum(str(time.time()))[:5]}"
 
-    def update_dict(self, notetype: NotetypeDict) -> OpChanges:
+    def update_dict(
+        self, notetype: NotetypeDict, skip_checks: bool = False
+    ) -> OpChanges:
         "Update a NotetypeDict. Caller will need to re-load notetype if new fields/cards added."
         self._remove_from_cache(notetype["id"])
         self.ensure_name_unique(notetype)
-        return self.col._backend.update_notetype_legacy(to_json_bytes(notetype))
+        return self.col._backend.update_notetype_legacy(
+            json=to_json_bytes(notetype), skip_checks=skip_checks
+        )
 
     def _mutate_after_write(self, notetype: NotetypeDict) -> None:
         # existing code expects the note type to be mutated to reflect
@@ -275,7 +282,7 @@ class ModelManager(DeprecatedNamesMixin):
     def new_field(self, name: str) -> FieldDict:
         assert isinstance(name, str)
         notetype = from_json_bytes(
-            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.KIND_BASIC)
         )
         field = notetype["flds"][0]
         field["name"] = name
@@ -319,7 +326,7 @@ class ModelManager(DeprecatedNamesMixin):
 
     def new_template(self, name: str) -> TemplateDict:
         notetype = from_json_bytes(
-            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.KIND_BASIC)
         )
         template = notetype["tmpls"][0]
         template["name"] = name
@@ -370,7 +377,7 @@ and notes.mid = ? and cards.ord = ?""",
 
     def change_notetype_info(
         self, *, old_notetype_id: NotetypeId, new_notetype_id: NotetypeId
-    ) -> bytes:
+    ) -> ChangeNotetypeInfo:
         return self.col._backend.get_change_notetype_info(
             old_notetype_id=old_notetype_id, new_notetype_id=new_notetype_id
         )
@@ -388,7 +395,18 @@ and notes.mid = ? and cards.ord = ?""",
         field/template count. Each value represents the index in the previous
         notetype. -1 indicates the original value will be discarded.
         """
-        return self.col._backend.change_notetype(input)
+        op_bytes = self.col._backend.change_notetype_raw(input.SerializeToString())
+        return OpChanges.FromString(op_bytes)
+
+    def restore_notetype_to_stock(
+        self, notetype_id: NotetypeId, force_kind: StockNotetypeKind.V | None
+    ) -> OpChanges:
+        msg = notetypes_pb2.RestoreNotetypeToStockRequest(
+            notetype_id=notetypes_pb2.NotetypeId(ntid=notetype_id),
+        )
+        if force_kind is not None:
+            msg.force_kind = force_kind
+        return self.col._backend.restore_notetype_to_stock(msg)
 
     # legacy API - used by unit tests and add-ons
 
@@ -404,25 +422,21 @@ and notes.mid = ? and cards.ord = ?""",
         self.col.mod_schema(check=True)
         assert fmap
         field_map = self._convert_legacy_map(fmap, len(newModel["flds"]))
-        if (
-            not cmap
-            or newModel["type"] == MODEL_CLOZE
-            or notetype["type"] == MODEL_CLOZE
-        ):
+        is_cloze = newModel["type"] == MODEL_CLOZE or notetype["type"] == MODEL_CLOZE
+        if not cmap or is_cloze:
             template_map = []
         else:
             template_map = self._convert_legacy_map(cmap, len(newModel["tmpls"]))
 
         self.col._backend.change_notetype(
-            ChangeNotetypeRequest(
-                note_ids=nids,
-                new_fields=field_map,
-                new_templates=template_map,
-                old_notetype_name=notetype["name"],
-                old_notetype_id=notetype["id"],
-                new_notetype_id=newModel["id"],
-                current_schema=self.col.db.scalar("select scm from col"),
-            )
+            note_ids=nids,
+            new_fields=field_map,
+            new_templates=template_map,
+            old_notetype_name=notetype["name"],
+            old_notetype_id=notetype["id"],
+            new_notetype_id=newModel["id"],
+            current_schema=self.col.db.scalar("select scm from col"),
+            is_cloze=is_cloze,
         )
 
     def _convert_legacy_map(

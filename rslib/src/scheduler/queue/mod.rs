@@ -9,14 +9,21 @@ pub(crate) mod undo;
 
 use std::collections::VecDeque;
 
-pub(crate) use builder::{DueCard, DueCardKind, NewCard};
-pub(crate) use entry::{QueueEntry, QueueEntryKind};
+use anki_proto::scheduler::SchedulingContext;
+pub(crate) use builder::DueCard;
+pub(crate) use builder::DueCardKind;
+pub(crate) use builder::NewCard;
+pub(crate) use entry::QueueEntry;
+pub(crate) use entry::QueueEntryKind;
 pub(crate) use learning::LearningQueueEntry;
-pub(crate) use main::{MainQueueEntry, MainQueueEntryKind};
+pub(crate) use main::MainQueueEntry;
+pub(crate) use main::MainQueueEntryKind;
 
 use self::undo::QueueUpdate;
-use super::{states::NextCardStates, timing::SchedTimingToday};
-use crate::{prelude::*, timestamp::TimestampSecs};
+use super::states::SchedulingStates;
+use super::timing::SchedTimingToday;
+use crate::prelude::*;
+use crate::timestamp::TimestampSecs;
 
 #[derive(Debug)]
 pub(crate) struct CardQueues {
@@ -49,7 +56,8 @@ impl Counts {
 pub struct QueuedCard {
     pub card: Card,
     pub kind: QueueEntryKind,
-    pub next_states: NextCardStates,
+    pub states: SchedulingStates,
+    pub context: SchedulingContext,
 }
 
 #[derive(Debug)]
@@ -58,6 +66,15 @@ pub struct QueuedCards {
     pub new_count: usize,
     pub learning_count: usize,
     pub review_count: usize,
+}
+
+/// When we encounter a card with new or review burying enabled, all future
+/// siblings need to be buried, regardless of their own settings.
+#[derive(Default, Debug, Clone, Copy)]
+pub(crate) struct BuryMode {
+    pub(crate) bury_new: bool,
+    pub(crate) bury_reviews: bool,
+    pub(crate) bury_interday_learning: bool,
 }
 
 impl Collection {
@@ -88,19 +105,22 @@ impl Collection {
                 let card = self
                     .storage
                     .get_card(entry.card_id())?
-                    .ok_or(AnkiError::NotFound)?;
-                if card.mtime != entry.mtime() {
-                    return Err(AnkiError::invalid_input(
-                        "bug: card modified without updating queue",
-                    ));
-                }
+                    .or_not_found(entry.card_id())?;
+                require!(
+                    card.mtime == entry.mtime(),
+                    "bug: card modified without updating queue: id:{} card:{} entry:{}",
+                    card.id,
+                    card.mtime,
+                    entry.mtime()
+                );
 
                 // fixme: pass in card instead of id
-                let next_states = self.get_next_card_states(card.id)?;
+                let next_states = self.get_scheduling_states(card.id)?;
 
                 Ok(QueuedCard {
+                    context: new_scheduling_context(self, &card)?,
                     card,
-                    next_states,
+                    states: next_states,
                     kind: entry.kind(),
                 })
             })
@@ -112,6 +132,16 @@ impl Collection {
             review_count: counts.review,
         })
     }
+}
+
+fn new_scheduling_context(col: &mut Collection, card: &Card) -> Result<SchedulingContext> {
+    Ok(SchedulingContext {
+        deck_name: col
+            .get_deck(card.original_or_current_deck_id())?
+            .or_not_found(card.deck_id)?
+            .human_name(),
+        seed: card.review_seed(),
+    })
 }
 
 impl CardQueues {
@@ -141,7 +171,7 @@ impl CardQueues {
         } else if self.main.front().filter(|e| e.id == id).is_some() {
             Ok(self.pop_main().unwrap().into())
         } else {
-            Err(AnkiError::invalid_input("not at top of queue"))
+            invalid_input!("not at top of queue")
         }
     }
 
@@ -199,7 +229,7 @@ impl Collection {
                 cutoff_snapshot,
             }));
         } else {
-            // we currenly allow the queues to be empty for unit tests
+            // we currently allow the queues to be empty for unit tests
         }
 
         Ok(())
@@ -216,8 +246,8 @@ impl Collection {
         Ok(self.state.card_queues.as_mut().unwrap())
     }
 
-    // Returns queues if they are valid and have not been rebuilt. If build time has changed,
-    // they are cleared.
+    // Returns queues if they are valid and have not been rebuilt. If build time has
+    // changed, they are cleared.
     pub(crate) fn get_or_invalidate_queues(
         &mut self,
         build_time: TimestampMillis,

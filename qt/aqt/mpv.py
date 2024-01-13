@@ -36,10 +36,8 @@ import sys
 import tempfile
 import threading
 import time
-from distutils.spawn import (  # pylint: disable=import-error,no-name-in-module
-    find_executable,
-)
 from queue import Empty, Full, Queue
+from shutil import which
 from typing import Optional
 
 from anki.utils import is_win
@@ -78,7 +76,7 @@ class MPVBase:
     based JSON IPC.
     """
 
-    executable = find_executable("mpv")
+    executable = which("mpv")
     popenEnv: Optional[dict[str, str]] = None
 
     default_argv = [
@@ -91,6 +89,9 @@ class MPVBase:
         "--autoload-files=no",
         "--gapless-audio=no",
     ]
+
+    if is_win:
+        default_argv += ["--af-add=lavfi=[apad=pad_dur=0.150]"]
 
     def __init__(self, window_id=None, debug=False):
         self.window_id = window_id
@@ -143,7 +144,7 @@ class MPVBase:
         --input-unix-socket option.
         """
         if is_win:
-            self._sock_filename = "ankimpv"
+            self._sock_filename = "ankimpv{}".format(os.getpid())
             return
         fd, self._sock_filename = tempfile.mkstemp(prefix="mpv.")
         os.close(fd)
@@ -156,12 +157,11 @@ class MPVBase:
         start = time.time()
         while self.is_running() and time.time() < start + 10:
             time.sleep(0.1)
-
             if is_win:
                 # named pipe
                 try:
                     self._sock = win32file.CreateFile(
-                        r"\\.\pipe\ankimpv",
+                        r"\\.\pipe\{}".format(self._sock_filename),
                         win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                         0,
                         None,

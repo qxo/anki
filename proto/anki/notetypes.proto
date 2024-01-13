@@ -3,6 +3,8 @@
 
 syntax = "proto3";
 
+option java_multiple_files = true;
+
 package anki.notetypes;
 
 import "anki/generic.proto";
@@ -12,7 +14,8 @@ service NotetypesService {
   rpc AddNotetype(Notetype) returns (collection.OpChangesWithId);
   rpc UpdateNotetype(Notetype) returns (collection.OpChanges);
   rpc AddNotetypeLegacy(generic.Json) returns (collection.OpChangesWithId);
-  rpc UpdateNotetypeLegacy(generic.Json) returns (collection.OpChanges);
+  rpc UpdateNotetypeLegacy(UpdateNotetypeLegacyRequest)
+      returns (collection.OpChanges);
   rpc AddOrUpdateNotetype(AddOrUpdateNotetypeRequest) returns (NotetypeId);
   rpc GetStockNotetypeLegacy(StockNotetype) returns (generic.Json);
   rpc GetNotetype(NotetypeId) returns (Notetype);
@@ -27,7 +30,14 @@ service NotetypesService {
   rpc GetChangeNotetypeInfo(GetChangeNotetypeInfoRequest)
       returns (ChangeNotetypeInfo);
   rpc ChangeNotetype(ChangeNotetypeRequest) returns (collection.OpChanges);
+  rpc GetFieldNames(NotetypeId) returns (generic.StringList);
+  rpc RestoreNotetypeToStock(RestoreNotetypeToStockRequest)
+      returns (collection.OpChanges);
 }
+
+// Implicitly includes any of the above methods that are not listed in the
+// backend service.
+service BackendNotetypesService {}
 
 message NotetypeId {
   int64 ntid = 1;
@@ -53,12 +63,16 @@ message Notetype {
     Kind kind = 1;
     uint32 sort_field_idx = 2;
     string css = 3;
-    /// This is now stored separately; retrieve with DefaultsForAdding()
+    // This is now stored separately; retrieve with DefaultsForAdding()
     int64 target_deck_id_unused = 4;
     string latex_pre = 5;
     string latex_post = 6;
     bool latex_svg = 7;
     repeated CardRequirement reqs = 8;
+    // Only set on notetypes created with Anki 2.1.62+.
+    StockNotetype.OriginalStockKind original_stock_kind = 9;
+    // the id in the source collection for imported notetypes (Anki 23.10)
+    optional int64 original_id = 10;
 
     bytes other = 255;
   }
@@ -69,6 +83,14 @@ message Notetype {
       string font_name = 3;
       uint32 font_size = 4;
       string description = 5;
+      bool plain_text = 6;
+      bool collapsed = 7;
+      bool exclude_from_search = 8;
+      // used for merging notetypes on import (Anki 23.10)
+      optional int64 id = 9;
+      // Can be used to uniquely identify required fields.
+      optional uint32 tag = 10;
+      bool prevent_deletion = 11;
 
       bytes other = 255;
     }
@@ -85,6 +107,8 @@ message Notetype {
       int64 target_deck_id = 5;
       string browser_font_name = 6;
       uint32 browser_font_size = 7;
+      // used for merging notetypes on import (Anki 23.10)
+      optional int64 id = 8;
 
       bytes other = 255;
     }
@@ -111,13 +135,32 @@ message AddOrUpdateNotetypeRequest {
   bool skip_checks = 3;
 }
 
+message UpdateNotetypeLegacyRequest {
+  bytes json = 1;
+  bool skip_checks = 2;
+}
+
 message StockNotetype {
   enum Kind {
-    BASIC = 0;
-    BASIC_AND_REVERSED = 1;
-    BASIC_OPTIONAL_REVERSED = 2;
-    BASIC_TYPING = 3;
-    CLOZE = 4;
+    KIND_BASIC = 0;
+    KIND_BASIC_AND_REVERSED = 1;
+    KIND_BASIC_OPTIONAL_REVERSED = 2;
+    KIND_BASIC_TYPING = 3;
+    KIND_CLOZE = 4;
+    KIND_IMAGE_OCCLUSION = 5;
+  }
+  // This is decoupled from Kind to allow us to evolve notetypes over time
+  // (eg an older notetype might require different JS), and allow us to store
+  // a type even for notetypes that we don't add by default. Code should not
+  // assume that the entries here are always +1 from Kind.
+  enum OriginalStockKind {
+    ORIGINAL_STOCK_KIND_UNKNOWN = 0;
+    ORIGINAL_STOCK_KIND_BASIC = 1;
+    ORIGINAL_STOCK_KIND_BASIC_AND_REVERSED = 2;
+    ORIGINAL_STOCK_KIND_BASIC_OPTIONAL_REVERSED = 3;
+    ORIGINAL_STOCK_KIND_BASIC_TYPING = 4;
+    ORIGINAL_STOCK_KIND_CLOZE = 5;
+    ORIGINAL_STOCK_KIND_IMAGE_OCCLUSION = 6;
   }
 
   Kind kind = 1;
@@ -168,6 +211,7 @@ message ChangeNotetypeRequest {
   int64 new_notetype_id = 5;
   int64 current_schema = 6;
   string old_notetype_name = 7;
+  bool is_cloze = 8;
 }
 
 message ChangeNotetypeInfo {
@@ -177,4 +221,24 @@ message ChangeNotetypeInfo {
   repeated string new_template_names = 4;
   ChangeNotetypeRequest input = 5;
   string old_notetype_name = 6;
+}
+
+message RestoreNotetypeToStockRequest {
+  NotetypeId notetype_id = 1;
+  // Older notetypes did not store their original stock kind, so we allow the UI
+  // to pass in an override to use when missing, or for tests.
+  optional StockNotetype.Kind force_kind = 2;
+}
+
+enum ImageOcclusionField {
+  IMAGE_OCCLUSION_FIELD_OCCLUSIONS = 0;
+  IMAGE_OCCLUSION_FIELD_IMAGE = 1;
+  IMAGE_OCCLUSION_FIELD_HEADER = 2;
+  IMAGE_OCCLUSION_FIELD_BACK_EXTRA = 3;
+  IMAGE_OCCLUSION_FIELD_COMMENTS = 4;
+}
+
+enum ClozeField {
+  CLOZE_FIELD_TEXT = 0;
+  CLOZE_FIELD_BACK_EXTRA = 1;
 }

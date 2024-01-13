@@ -1,7 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{ops::StateChanges, prelude::*};
+use crate::ops::StateChanges;
+use crate::prelude::*;
 
 impl Collection {
     fn transact_inner<F, R>(&mut self, op: Option<Op>, func: F) -> Result<OpOutput<R>>
@@ -10,6 +11,7 @@ impl Collection {
     {
         let have_op = op.is_some();
         let skip_undo_queue = op == Some(Op::SkipUndo);
+        let autocommit = self.storage.db.is_autocommit();
 
         self.storage.begin_rust_trx()?;
         self.begin_undoable_operation(op);
@@ -31,9 +33,9 @@ impl Collection {
                     changes
                 } else {
                     self.clear_study_queues();
-                    // dummy value for transact_no_undo() case
+                    // dummy value that will be discarded
                     OpChanges {
-                        op: Op::SetFlag,
+                        op: Op::SkipUndo,
                         changes: StateChanges::default(),
                     }
                 };
@@ -43,7 +45,11 @@ impl Collection {
             // roll back on error
             .or_else(|err| {
                 self.discard_undo_and_study_queues();
-                self.storage.rollback_rust_trx()?;
+                if autocommit {
+                    self.storage.rollback_trx()?;
+                } else {
+                    self.storage.rollback_rust_trx()?;
+                }
                 Err(err)
             })
     }

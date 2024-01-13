@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import aqt
 import aqt.deckconf
+import aqt.main
 from anki.cards import Card
 from anki.decks import DeckDict, DeckId
 from anki.lang import without_unicode_isolation
@@ -18,7 +19,7 @@ from aqt.utils import (
     saveGeom,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class DeckOptionsDialog(QDialog):
@@ -32,23 +33,23 @@ class DeckOptionsDialog(QDialog):
         self.mw = mw
         self._deck = deck
         self._setup_ui()
-        self.show()
 
     def _setup_ui(self) -> None:
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.mw.garbage_collect_on_dialog_finish(self)
         self.setMinimumWidth(400)
         disable_help_button(self)
-        restoreGeom(self, self.TITLE)
+        restoreGeom(self, self.TITLE, default_size=(800, 800))
         addCloseShortcut(self)
 
-        self.web = AnkiWebView(title=self.TITLE)
-        self.web.setVisible(False)
+        self.web = AnkiWebView(kind=AnkiWebViewKind.DECK_OPTIONS)
         self.web.load_ts_page("deck-options")
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.web)
         self.setLayout(layout)
+        self.show()
+        self.web.hide_while_preserving_layout()
 
         self.web.eval(
             f"""const $deckOptions = anki.setupDeckOptions({self._deck["id"]});"""
@@ -59,6 +60,7 @@ class DeckOptionsDialog(QDialog):
         gui_hooks.deck_options_did_load(self)
 
     def reject(self) -> None:
+        self.mw.col.set_wants_abort()
         self.web.cleanup()
         self.web = None
         saveGeom(self, self.TITLE)
@@ -95,7 +97,7 @@ def _deck_prompt_dialog(decks: list[DeckDict]) -> None:
     qconnect(button.clicked, diag.close)
     box.addWidget(button)
     diag.setLayout(box)
-    diag.exec()
+    diag.open()
 
 
 def display_options_for_deck_id(deck_id: DeckId) -> None:
@@ -104,7 +106,7 @@ def display_options_for_deck_id(deck_id: DeckId) -> None:
 
 def display_options_for_deck(deck: DeckDict) -> None:
     if not deck["dyn"]:
-        if KeyboardModifiersPressed().shift or aqt.mw.col.sched_ver() == 1:
+        if KeyboardModifiersPressed().shift or not aqt.mw.col.v3_scheduler():
             deck_legacy = aqt.mw.col.decks.get(DeckId(deck["id"]))
             aqt.deckconf.DeckConf(aqt.mw, deck_legacy)
         else:

@@ -1,9 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{
-    IntervalKind, NextCardStates, PreviewState, ReschedulingFilterState, ReviewState, StateContext,
-};
+use super::IntervalKind;
+use super::PreviewState;
+use super::ReschedulingFilterState;
+use super::ReviewState;
+use super::SchedulingStates;
+use super::StateContext;
 use crate::revlog::RevlogReviewKind;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,7 +30,7 @@ impl FilteredState {
         }
     }
 
-    pub(crate) fn next_states(self, ctx: &StateContext) -> NextCardStates {
+    pub(crate) fn next_states(self, ctx: &StateContext) -> SchedulingStates {
         match self {
             FilteredState::Preview(state) => state.next_states(ctx),
             FilteredState::Rescheduling(state) => state.next_states(ctx),

@@ -7,6 +7,8 @@ from typing import Sequence
 
 import aqt
 import aqt.deckconf
+import aqt.main
+import aqt.operations
 from anki.collection import OpChanges
 from anki.models import ChangeNotetypeRequest, NotetypeId
 from anki.notes import NoteId
@@ -21,11 +23,10 @@ from aqt.utils import (
     tooltip,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class ChangeNotetypeDialog(QDialog):
-
     TITLE = "changeNotetype"
     silentlyClose = True
 
@@ -47,10 +48,10 @@ class ChangeNotetypeDialog(QDialog):
         self.mw.garbage_collect_on_dialog_finish(self)
         self.setMinimumSize(400, 300)
         disable_help_button(self)
-        restoreGeom(self, self.TITLE)
+        restoreGeom(self, self.TITLE, default_size=(800, 800))
         addCloseShortcut(self)
 
-        self.web = AnkiWebView(title=self.TITLE)
+        self.web = AnkiWebView(kind=AnkiWebViewKind.CHANGE_NOTETYPE)
         self.web.setVisible(False)
         self.web.load_ts_page("change-notetype")
         layout = QVBoxLayout()

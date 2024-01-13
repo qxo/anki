@@ -7,7 +7,6 @@ import json as _json
 import os
 import platform
 import random
-import re
 import shutil
 import string
 import subprocess
@@ -16,7 +15,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from hashlib import sha1
-from typing import Any, Iterable, Iterator, no_type_check
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from anki._legacy import DeprecatedNamesMixinForModule
 from anki.dbproxy import DBProxy
@@ -27,11 +26,14 @@ try:
     # pylint: disable=c-extension-no-member
     import orjson
 
-    to_json_bytes = orjson.dumps
+    to_json_bytes: Callable[[Any], bytes] = orjson.dumps
     from_json_bytes = orjson.loads
 except:
     print("orjson is missing; DB operations will be slower")
-    to_json_bytes = lambda obj: _json.dumps(obj).encode("utf8")  # type: ignore
+
+    def to_json_bytes(obj: Any) -> bytes:
+        return _json.dumps(obj).encode("utf8")
+
     from_json_bytes = _json.loads
 
 
@@ -66,15 +68,11 @@ def strip_html_media(txt: str) -> str:
 
 
 def html_to_text_line(txt: str) -> str:
-    txt = txt.replace("<br>", " ")
-    txt = txt.replace("<br />", " ")
-    txt = txt.replace("<div>", " ")
-    txt = txt.replace("\n", " ")
-    txt = re.sub(r"\[sound:[^]]+\]", "", txt)
-    txt = re.sub(r"\[\[type:[^]]+\]\]", "", txt)
-    txt = strip_html_media(txt)
-    txt = txt.strip()
-    return txt
+    import anki.lang
+
+    return anki.lang.current_i18n.html_to_text_line(
+        text=txt, preserve_media_filenames=True
+    )
 
 
 # IDs
@@ -124,7 +122,7 @@ def base91(num: int) -> str:
 
 def guid64() -> str:
     "Return a base91-encoded 64bit random number."
-    return base91(random.randint(0, 2 ** 64 - 1))
+    return base91(random.randint(0, 2**64 - 1))
 
 
 # Fields
@@ -301,14 +299,42 @@ def version_with_build() -> str:
     return f"{version} ({buildhash})"
 
 
-def point_version() -> int:
+def int_version() -> int:
+    """Anki's version as an integer in the form YYMMPP, e.g. 230900.
+    (year, month, patch).
+    In 2.1.x releases, this was just the last number."""
     from anki.buildinfo import version
 
-    return int(version.split(".")[-1])
+    try:
+        [year, month, patch] = version.split(".")
+    except ValueError:
+        [year, month] = version.split(".")
+        patch = "0"
+
+    year_num = int(year)
+    month_num = int(month)
+    patch_num = int(patch)
+
+    return year_num * 10_000 + month_num * 100 + patch_num
 
 
-# keep the legacy alias around without a deprecation warning for now
-pointVersion = point_version
+def int_version_to_str(ver: int) -> str:
+    if ver <= 99:
+        return f"2.1.{ver}"
+    else:
+        year = ver // 10_000
+        month = (ver // 100) % 100
+        patch = ver % 100
+        out = f"{year:02}.{month:02}"
+        if patch:
+            out += f".{patch}"
+        return out
+
+
+# these two legacy aliases are provided without deprecation warnings, as add-ons that want to support
+# old versions could not use the new name without catching cases where it doesn't exist
+point_version = int_version
+pointVersion = int_version
 
 _deprecated_names = DeprecatedNamesMixinForModule(globals())
 _deprecated_names.register_deprecated_aliases(
@@ -321,6 +347,7 @@ _deprecated_names.register_deprecated_aliases(
 _deprecated_names.register_deprecated_attributes(json=((_json, "_json"), None))
 
 
-@no_type_check
-def __getattr__(name: str) -> Any:
-    return _deprecated_names.__getattr__(name)
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        return _deprecated_names.__getattr__(name)

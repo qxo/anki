@@ -1,16 +1,20 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{collection::Collection, config::SchedulerVersion, error::Result, prelude::*};
+use crate::collection::Collection;
+use crate::config::SchedulerVersion;
+use crate::error::Result;
+use crate::prelude::*;
 
 pub mod answering;
 pub mod bury_and_suspend;
 pub(crate) mod congrats;
 pub(crate) mod filtered;
-mod learning;
+pub mod fsrs;
 pub mod new;
 pub(crate) mod queue;
 mod reviews;
+mod service;
 pub mod states;
 pub mod timespan;
 pub mod timing;
@@ -18,10 +22,8 @@ mod upgrade;
 
 use chrono::FixedOffset;
 pub use reviews::parse_due_date_str;
-use timing::{
-    sched_timing_today, v1_creation_date_adjusted_to_hour, v1_rollover_from_creation_stamp,
-    SchedTimingToday,
-};
+use timing::sched_timing_today;
+use timing::SchedTimingToday;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerInfo {
@@ -71,13 +73,13 @@ impl Collection {
             }
         };
 
-        Ok(sched_timing_today(
+        sched_timing_today(
             self.storage.creation_stamp()?,
             now,
             self.creation_utc_offset(),
             current_utc_offset,
             rollover_hour,
-        ))
+        )
     }
 
     /// In the client case, return the current local timezone offset,
@@ -88,9 +90,9 @@ impl Collection {
         let config_tz = self
             .get_configured_utc_offset()
             .and_then(|v| FixedOffset::west_opt(v * 60))
-            .unwrap_or_else(|| FixedOffset::west(0));
+            .unwrap_or_else(|| FixedOffset::west_opt(0).unwrap());
 
-        let local_tz = TimestampSecs::now().local_utc_offset();
+        let local_tz = TimestampSecs::now().local_utc_offset()?;
 
         Ok(if self.server {
             config_tz
@@ -113,18 +115,14 @@ impl Collection {
 
     pub fn rollover_for_current_scheduler(&self) -> Result<u8> {
         match self.scheduler_version() {
-            SchedulerVersion::V1 => Ok(v1_rollover_from_creation_stamp(
-                self.storage.creation_stamp()?.0,
-            )),
+            SchedulerVersion::V1 => Err(AnkiError::SchedulerUpgradeRequired),
             SchedulerVersion::V2 => Ok(self.get_v2_rollover().unwrap_or(4)),
         }
     }
 
     pub(crate) fn set_rollover_for_current_scheduler(&mut self, hour: u8) -> Result<()> {
         match self.scheduler_version() {
-            SchedulerVersion::V1 => self.set_creation_stamp(TimestampSecs(
-                v1_creation_date_adjusted_to_hour(self.storage.creation_stamp()?.0, hour),
-            )),
+            SchedulerVersion::V1 => Err(AnkiError::SchedulerUpgradeRequired),
             SchedulerVersion::V2 => self.set_v2_rollover(hour as u32),
         }
     }

@@ -1,17 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use anki_proto::scheduler::bury_or_suspend_cards_request::Mode as BuryOrSuspendMode;
+use anki_proto::scheduler::unbury_deck_request::Mode as UnburyDeckMode;
+
+use super::queue::BuryMode;
 use super::timing::SchedTimingToday;
-use crate::{
-    backend_proto::{
-        bury_or_suspend_cards_request::Mode as BuryOrSuspendMode,
-        unbury_deck_request::Mode as UnburyDeckMode,
-    },
-    card::CardQueue,
-    config::SchedulerVersion,
-    prelude::*,
-    search::{SearchNode, SortMode, StateKind},
-};
+use crate::card::CardQueue;
+use crate::config::SchedulerVersion;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::SearchNode;
+use crate::search::StateKind;
 
 impl Card {
     /// True if card was buried/suspended prior to the call.
@@ -42,32 +42,29 @@ impl Collection {
     /// Unbury cards from the previous day.
     /// Done automatically, and does not mark the cards as modified.
     pub(crate) fn unbury_on_day_rollover(&mut self, today: u32) -> Result<()> {
-        self.search_cards_into_table("is:buried", SortMode::NoOrder)?;
-        self.storage.for_each_card_in_search(|mut card| {
+        self.for_each_card_in_search(StateKind::Buried, |col, mut card| {
             card.restore_queue_after_bury_or_suspend();
-            self.storage.update_card(&card)
+            col.storage.update_card(&card)
         })?;
-        self.storage.clear_searched_cards_table()?;
         self.set_last_unburied_day(today)
     }
 
-    /// Unsuspend/unbury cards in search table, and clear it.
-    /// Marks the cards as modified.
-    fn unsuspend_or_unbury_searched_cards(&mut self) -> Result<()> {
+    /// Unsuspend/unbury cards. Marks the cards as modified.
+    fn unsuspend_or_unbury_searched_cards(&mut self, cards: Vec<Card>) -> Result<()> {
         let usn = self.usn()?;
-        for original in self.storage.all_searched_cards()? {
+        for original in cards {
             let mut card = original.clone();
             if card.restore_queue_after_bury_or_suspend() {
                 self.update_card_inner(&mut card, original, usn)?;
             }
         }
-        self.storage.clear_searched_cards_table()
+        Ok(())
     }
 
     pub fn unbury_or_unsuspend_cards(&mut self, cids: &[CardId]) -> Result<OpOutput<()>> {
         self.transact(Op::UnburyUnsuspend, |col| {
-            col.storage.set_search_table_to_card_ids(cids, false)?;
-            col.unsuspend_or_unbury_searched_cards()
+            let cards = col.all_cards_for_ids(cids, false)?;
+            col.unsuspend_or_unbury_searched_cards(cards)
         })
     }
 
@@ -78,50 +75,41 @@ impl Collection {
             UnburyDeckMode::SchedOnly => StateKind::SchedBuried,
         };
         self.transact(Op::UnburyUnsuspend, |col| {
-            col.search_cards_into_table(
-                match_all![SearchNode::DeckIdWithChildren(deck_id), state],
-                SortMode::NoOrder,
-            )?;
-            col.unsuspend_or_unbury_searched_cards()
+            let cards =
+                col.all_cards_for_search(SearchNode::DeckIdWithChildren(deck_id).and(state))?;
+            col.unsuspend_or_unbury_searched_cards(cards)
         })
     }
 
-    /// Bury/suspend cards in search table, and clear it.
     /// Marks the cards as modified.
-    fn bury_or_suspend_searched_cards(&mut self, mode: BuryOrSuspendMode) -> Result<usize> {
+    fn bury_or_suspend_cards_inner(
+        &mut self,
+        cards: Vec<Card>,
+        mode: BuryOrSuspendMode,
+    ) -> Result<usize> {
         let mut count = 0;
         let usn = self.usn()?;
         let sched = self.scheduler_version();
+        if sched == SchedulerVersion::V1 {
+            return Err(AnkiError::SchedulerUpgradeRequired);
+        }
         let desired_queue = match mode {
             BuryOrSuspendMode::Suspend => CardQueue::Suspended,
             BuryOrSuspendMode::BurySched => CardQueue::SchedBuried,
-            BuryOrSuspendMode::BuryUser => {
-                if sched == SchedulerVersion::V1 {
-                    // v1 scheduler only had one bury type
-                    CardQueue::SchedBuried
-                } else {
-                    CardQueue::UserBuried
-                }
-            }
+            BuryOrSuspendMode::BuryUser => CardQueue::UserBuried,
         };
 
-        for original in self.storage.all_searched_cards()? {
+        for original in cards {
             let mut card = original.clone();
             if card.queue != desired_queue {
                 // do not bury suspended cards as that would unsuspend them
                 if card.queue != CardQueue::Suspended {
-                    if sched == SchedulerVersion::V1 {
-                        card.remove_from_filtered_deck_restoring_queue(sched);
-                        card.remove_from_learning();
-                    }
                     card.queue = desired_queue;
                     count += 1;
                     self.update_card_inner(&mut card, original, usn)?;
                 }
             }
         }
-
-        self.storage.clear_searched_cards_table()?;
 
         Ok(count)
     }
@@ -136,35 +124,57 @@ impl Collection {
             BuryOrSuspendMode::BurySched | BuryOrSuspendMode::BuryUser => Op::Bury,
         };
         self.transact(op, |col| {
-            col.storage.set_search_table_to_card_ids(cids, false)?;
-            col.bury_or_suspend_searched_cards(mode)
+            let cards = col.all_cards_for_ids(cids, false)?;
+            col.bury_or_suspend_cards_inner(cards, mode)
         })
     }
 
     pub(crate) fn bury_siblings(
         &mut self,
-        cid: CardId,
+        card: &Card,
         nid: NoteId,
-        include_new: bool,
-        include_reviews: bool,
+        mut bury_mode: BuryMode,
     ) -> Result<usize> {
-        self.storage
-            .search_siblings_for_bury(cid, nid, include_new, include_reviews)?;
-        self.bury_or_suspend_searched_cards(BuryOrSuspendMode::BurySched)
+        bury_mode.exclude_earlier_gathered_queues(card.queue);
+        let cards = self
+            .storage
+            .all_siblings_for_bury(card.id, nid, bury_mode)?;
+        self.bury_or_suspend_cards_inner(cards, BuryOrSuspendMode::BurySched)
+    }
+}
+
+impl BuryMode {
+    /// Disables burying for queues gathered before `queue`.
+    fn exclude_earlier_gathered_queues(&mut self, queue: CardQueue) {
+        self.bury_interday_learning &= queue.gather_ord() <= CardQueue::DayLearn.gather_ord();
+        self.bury_reviews &= queue.gather_ord() <= CardQueue::Review.gather_ord();
+    }
+}
+
+impl CardQueue {
+    fn gather_ord(self) -> u8 {
+        match self {
+            CardQueue::Learn | CardQueue::PreviewRepeat => 0,
+            CardQueue::DayLearn => 1,
+            CardQueue::Review => 2,
+            CardQueue::New => 3,
+            // not gathered
+            CardQueue::Suspended | CardQueue::SchedBuried | CardQueue::UserBuried => u8::MAX,
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        card::{Card, CardQueue},
-        collection::{open_test_collection, Collection},
-        search::{SortMode, StateKind},
-    };
+    use crate::card::Card;
+    use crate::card::CardQueue;
+    use crate::collection::Collection;
+    use crate::search::SortMode;
+    use crate::search::StateKind;
 
     #[test]
     fn unbury() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut card = Card {
             queue: CardQueue::UserBuried,
             ..Default::default()

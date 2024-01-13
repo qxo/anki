@@ -3,28 +3,34 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import TitledContainer from "./TitledContainer.svelte";
-    import StepsInputRow from "./StepsInputRow.svelte";
-    import SpinBoxRow from "./SpinBoxRow.svelte";
-    import EnumSelectorRow from "./EnumSelectorRow.svelte";
-    import Item from "../components/Item.svelte";
-    import Warning from "./Warning.svelte";
+    import { DeckConfig_Config_NewCardInsertOrder } from "@tslib/anki/deck_config_pb";
+    import * as tr from "@tslib/ftl";
+    import { HelpPage } from "@tslib/help-page";
+    import type Carousel from "bootstrap/js/dist/carousel";
+    import type Modal from "bootstrap/js/dist/modal";
 
+    import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
+    import EnumSelectorRow from "../components/EnumSelectorRow.svelte";
+    import HelpModal from "../components/HelpModal.svelte";
+    import Item from "../components/Item.svelte";
+    import SettingTitle from "../components/SettingTitle.svelte";
+    import TitledContainer from "../components/TitledContainer.svelte";
+    import { type HelpItem, HelpItemScheduler } from "../components/types";
+    import { newInsertOrderChoices } from "./choices";
     import type { DeckOptionsState } from "./lib";
-    import * as tr from "../lib/ftl";
+    import SpinBoxRow from "./SpinBoxRow.svelte";
+    import StepsInputRow from "./StepsInputRow.svelte";
+    import Warning from "./Warning.svelte";
 
     export let state: DeckOptionsState;
     export let api = {};
 
-    let config = state.currentConfig;
-    let defaults = state.defaults;
-
-    const newInsertOrderChoices = [
-        tr.deckConfigNewInsertionOrderSequential(),
-        tr.deckConfigNewInsertionOrderRandom(),
-    ];
+    const config = state.currentConfig;
+    const defaults = state.defaults;
+    const fsrs = state.fsrs;
 
     let stepsExceedGraduatingInterval: string;
+    let stepsTooLargeForFsrs: string;
     $: {
         const lastLearnStepInDays = $config.learnSteps.length
             ? $config.learnSteps[$config.learnSteps.length - 1] / 60 / 24
@@ -33,54 +39,148 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             lastLearnStepInDays > $config.graduatingIntervalGood
                 ? tr.deckConfigLearningStepAboveGraduatingInterval()
                 : "";
+        stepsTooLargeForFsrs =
+            $fsrs && lastLearnStepInDays >= 1
+                ? tr.deckConfigStepsTooLargeForFsrs()
+                : "";
     }
 
     $: goodExceedsEasy =
         $config.graduatingIntervalGood > $config.graduatingIntervalEasy
             ? tr.deckConfigGoodAboveEasy()
             : "";
+
+    $: insertionOrderRandom =
+        $config.newCardInsertOrder == DeckConfig_Config_NewCardInsertOrder.RANDOM
+            ? tr.deckConfigNewInsertionOrderRandomWithV3()
+            : "";
+
+    const settings = {
+        learningSteps: {
+            title: tr.deckConfigLearningSteps(),
+            help: tr.deckConfigLearningStepsTooltip(),
+            url: HelpPage.DeckOptions.learningSteps,
+        },
+        graduatingInterval: {
+            title: tr.schedulingGraduatingInterval(),
+            help: tr.deckConfigGraduatingIntervalTooltip(),
+            url: HelpPage.DeckOptions.graduatingInterval,
+            sched: HelpItemScheduler.SM2,
+        },
+        easyInterval: {
+            title: tr.schedulingEasyInterval(),
+            help: tr.deckConfigEasyIntervalTooltip(),
+            url: HelpPage.DeckOptions.easyInterval,
+            sched: HelpItemScheduler.SM2,
+        },
+        insertionOrder: {
+            title: tr.deckConfigNewInsertionOrder(),
+            help: tr.deckConfigNewInsertionOrderTooltip(),
+            url: HelpPage.DeckOptions.insertionOrder,
+        },
+    };
+    const helpSections = Object.values(settings) as HelpItem[];
+
+    let modal: Modal;
+    let carousel: Carousel;
+
+    function openHelpModal(index: number): void {
+        modal.show();
+        carousel.to(index);
+    }
 </script>
 
-<TitledContainer title={tr.schedulingNewCards()} {api}>
-    <StepsInputRow
-        bind:value={$config.learnSteps}
-        defaultValue={defaults.learnSteps}
-        markdownTooltip={tr.deckConfigLearningStepsTooltip()}
-    >
-        {tr.deckConfigLearningSteps()}
-    </StepsInputRow>
+<TitledContainer title={tr.schedulingNewCards()}>
+    <HelpModal
+        title={tr.schedulingNewCards()}
+        url={HelpPage.DeckOptions.newCards}
+        slot="tooltip"
+        {helpSections}
+        fsrs={$fsrs}
+        on:mount={(e) => {
+            modal = e.detail.modal;
+            carousel = e.detail.carousel;
+        }}
+    />
+    <DynamicallySlottable slotHost={Item} {api}>
+        <Item>
+            <StepsInputRow
+                bind:value={$config.learnSteps}
+                defaultValue={defaults.learnSteps}
+            >
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("learningSteps"))}
+                >
+                    {settings.learningSteps.title}
+                </SettingTitle>
+            </StepsInputRow>
+        </Item>
 
-    <SpinBoxRow
-        bind:value={$config.graduatingIntervalGood}
-        defaultValue={defaults.graduatingIntervalGood}
-        markdownTooltip={tr.deckConfigGraduatingIntervalTooltip()}
-    >
-        {tr.schedulingGraduatingInterval()}
-    </SpinBoxRow>
+        <Item>
+            <Warning warning={stepsTooLargeForFsrs} />
+        </Item>
 
-    <Item>
-        <Warning warning={stepsExceedGraduatingInterval} />
-    </Item>
+        {#if !$fsrs}
+            <Item>
+                <SpinBoxRow
+                    bind:value={$config.graduatingIntervalGood}
+                    defaultValue={defaults.graduatingIntervalGood}
+                >
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("graduatingInterval"),
+                            )}
+                    >
+                        {settings.graduatingInterval.title}
+                    </SettingTitle>
+                </SpinBoxRow>
+            </Item>
 
-    <SpinBoxRow
-        bind:value={$config.graduatingIntervalEasy}
-        defaultValue={defaults.graduatingIntervalEasy}
-        markdownTooltip={tr.deckConfigEasyIntervalTooltip()}
-    >
-        {tr.schedulingEasyInterval()}
-    </SpinBoxRow>
+            <Item>
+                <Warning warning={stepsExceedGraduatingInterval} />
+            </Item>
 
-    <Item>
-        <Warning warning={goodExceedsEasy} />
-    </Item>
+            <Item>
+                <SpinBoxRow
+                    bind:value={$config.graduatingIntervalEasy}
+                    defaultValue={defaults.graduatingIntervalEasy}
+                >
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("easyInterval"),
+                            )}
+                    >
+                        {settings.easyInterval.title}
+                    </SettingTitle>
+                </SpinBoxRow>
+            </Item>
 
-    <EnumSelectorRow
-        bind:value={$config.newCardInsertOrder}
-        defaultValue={defaults.newCardInsertOrder}
-        choices={newInsertOrderChoices}
-        breakpoint={"md"}
-        markdownTooltip={tr.deckConfigNewInsertionOrderTooltip()}
-    >
-        {tr.deckConfigNewInsertionOrder()}
-    </EnumSelectorRow>
+            <Item>
+                <Warning warning={goodExceedsEasy} />
+            </Item>
+        {/if}
+
+        <Item>
+            <EnumSelectorRow
+                bind:value={$config.newCardInsertOrder}
+                defaultValue={defaults.newCardInsertOrder}
+                choices={newInsertOrderChoices()}
+                breakpoint={"md"}
+            >
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("insertionOrder"))}
+                >
+                    {settings.insertionOrder.title}
+                </SettingTitle>
+            </EnumSelectorRow>
+        </Item>
+
+        <Item>
+            <Warning warning={insertionOrderRandom} />
+        </Item>
+    </DynamicallySlottable>
 </TitledContainer>

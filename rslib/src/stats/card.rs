@@ -1,43 +1,53 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    backend_proto as pb,
-    card::{CardQueue, CardType},
-    prelude::*,
-    revlog::RevlogEntry,
-};
+use fsrs::FSRS;
+
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::prelude::*;
+use crate::revlog::RevlogEntry;
+use crate::scheduler::timing::is_unix_epoch_timestamp;
 
 impl Collection {
-    pub fn card_stats(&mut self, cid: CardId) -> Result<pb::CardStatsResponse> {
-        let card = self.storage.get_card(cid)?.ok_or(AnkiError::NotFound)?;
+    pub fn card_stats(&mut self, cid: CardId) -> Result<anki_proto::stats::CardStatsResponse> {
+        let card = self.storage.get_card(cid)?.or_not_found(cid)?;
         let note = self
             .storage
             .get_note(card.note_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(card.note_id)?;
         let nt = self
             .get_notetype(note.notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(note.notetype_id)?;
         let deck = self
             .storage
             .get_deck(card.deck_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(card.deck_id)?;
         let revlog = self.storage.get_revlog_entries_for_card(card.id)?;
 
         let (average_secs, total_secs) = average_and_total_secs_strings(&revlog);
-        let (due_date, due_position) = self.due_date_and_position_strings(&card)?;
-
-        Ok(pb::CardStatsResponse {
+        let (due_date, due_position) = self.due_date_and_position(&card)?;
+        let timing = self.timing_today()?;
+        let days_elapsed = self
+            .storage
+            .time_of_last_review(card.id)?
+            .map(|ts| timing.next_day_at.elapsed_days_since(ts))
+            .unwrap_or_default() as u32;
+        let fsrs_retrievability = card
+            .memory_state
+            .zip(Some(days_elapsed))
+            .map(|(state, days)| {
+                FSRS::new(None)
+                    .unwrap()
+                    .current_retrievability(state.into(), days)
+            });
+        Ok(anki_proto::stats::CardStatsResponse {
             card_id: card.id.into(),
             note_id: card.note_id.into(),
             deck: deck.human_name(),
             added: card.id.as_secs().0,
-            first_review: revlog.first().map(|entry| pb::generic::Int64 {
-                val: entry.id.as_secs().0,
-            }),
-            latest_review: revlog.last().map(|entry| pb::generic::Int64 {
-                val: entry.id.as_secs().0,
-            }),
+            first_review: revlog.first().map(|entry| entry.id.as_secs().0),
+            latest_review: revlog.last().map(|entry| entry.id.as_secs().0),
             due_date,
             due_position,
             interval: card.interval,
@@ -49,41 +59,40 @@ impl Collection {
             card_type: nt.get_template(card.template_idx)?.name.clone(),
             notetype: nt.name.clone(),
             revlog: revlog.iter().rev().map(stats_revlog_entry).collect(),
+            memory_state: card.memory_state.map(Into::into),
+            fsrs_retrievability,
+            custom_data: card.custom_data,
         })
     }
 
-    fn due_date_and_position_strings(
-        &mut self,
-        card: &Card,
-    ) -> Result<(Option<pb::generic::Int64>, Option<pb::generic::Int32>)> {
+    fn due_date_and_position(&mut self, card: &Card) -> Result<(Option<i64>, Option<i32>)> {
         let due = if card.original_due != 0 {
             card.original_due
         } else {
             card.due
         };
-        Ok(match card.queue {
-            CardQueue::New => (None, Some(pb::generic::Int32 { val: due })),
-            CardQueue::Learn => (
-                Some(pb::generic::Int64 {
-                    val: TimestampSecs::now().0,
-                }),
-                None,
-            ),
-            CardQueue::Review | CardQueue::DayLearn => (
+        Ok(match card.ctype {
+            CardType::New => {
+                if matches!(card.queue, CardQueue::Review | CardQueue::DayLearn) {
+                    // new preview card not answered yet
+                    (None, card.original_position.map(|u| u as i32))
+                } else {
+                    (None, Some(due))
+                }
+            }
+            CardType::Review | CardType::Learn | CardType::Relearn => (
                 {
-                    if card.ctype == CardType::New {
-                        // new preview card not answered yet
-                        None
-                    } else {
+                    if !is_unix_epoch_timestamp(due) {
                         let days_remaining = due - (self.timing_today()?.days_elapsed as i32);
                         let mut due = TimestampSecs::now();
                         due.0 += (days_remaining as i64) * 86_400;
-                        Some(pb::generic::Int64 { val: due.0 })
+                        Some(due.0)
+                    } else {
+                        Some(due as i64)
                     }
                 },
                 None,
             ),
-            _ => (None, None),
         })
     }
 }
@@ -101,8 +110,10 @@ fn average_and_total_secs_strings(revlog: &[RevlogEntry]) -> (f32, f32) {
     }
 }
 
-fn stats_revlog_entry(entry: &RevlogEntry) -> pb::card_stats_response::StatsRevlogEntry {
-    pb::card_stats_response::StatsRevlogEntry {
+fn stats_revlog_entry(
+    entry: &RevlogEntry,
+) -> anki_proto::stats::card_stats_response::StatsRevlogEntry {
+    anki_proto::stats::card_stats_response::StatsRevlogEntry {
         time: entry.id.as_secs().0,
         review_kind: entry.review_kind.into(),
         button_chosen: entry.button_chosen as u32,
@@ -115,11 +126,11 @@ fn stats_revlog_entry(entry: &RevlogEntry) -> pb::card_stats_response::StatsRevl
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, search::SortMode};
+    use crate::search::SortMode;
 
     #[test]
     fn stats() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();

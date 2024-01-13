@@ -7,8 +7,20 @@ export function nodeIsElement(node: Node): node is Element {
     return node.nodeType === Node.ELEMENT_NODE;
 }
 
+/**
+ * In the web this is probably equivalent to `nodeIsElement`, but this is
+ * convenient to convince Typescript.
+ */
+export function nodeIsCommonElement(node: Node): node is HTMLElement | SVGElement {
+    return node instanceof HTMLElement || node instanceof SVGElement;
+}
+
 export function nodeIsText(node: Node): node is Text {
     return node.nodeType === Node.TEXT_NODE;
+}
+
+export function nodeIsComment(node: Node): node is Comment {
+    return node.nodeType === Node.COMMENT_NODE;
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/HTML/Block-level_elements
@@ -87,8 +99,8 @@ export function elementIsEmpty(element: Element): boolean {
 export function nodeContainsInlineContent(node: Node): boolean {
     for (const child of node.childNodes) {
         if (
-            (nodeIsElement(child) && elementIsBlock(child)) ||
-            !nodeContainsInlineContent(child)
+            (nodeIsElement(child) && elementIsBlock(child))
+            || !nodeContainsInlineContent(child)
         ) {
             return false;
         }
@@ -98,6 +110,9 @@ export function nodeContainsInlineContent(node: Node): boolean {
     return true;
 }
 
+/**
+ * Consumes the input fragment.
+ */
 export function fragmentToString(fragment: DocumentFragment): string {
     const fragmentDiv = document.createElement("div");
     fragmentDiv.appendChild(fragment);
@@ -107,8 +122,7 @@ export function fragmentToString(fragment: DocumentFragment): string {
 }
 
 const getAnchorParent =
-    <T extends Element>(predicate: (element: Element) => element is T) =>
-    (root: Node): T | null => {
+    <T extends Element>(predicate: (element: Element) => element is T) => (root: Node): T | null => {
         const anchor = getSelection(root)?.anchorNode;
 
         if (!anchor) {
@@ -128,12 +142,10 @@ const getAnchorParent =
 
 const isListItem = (element: Element): element is HTMLLIElement =>
     window.getComputedStyle(element).display === "list-item";
-const isParagraph = (element: Element): element is HTMLParamElement =>
-    element.tagName === "P";
+const isParagraph = (element: Element): element is HTMLParamElement => element.tagName === "P";
 const isBlockElement = (
     element: Element,
-): element is HTMLLIElement & HTMLParamElement =>
-    isListItem(element) || isParagraph(element);
+): element is HTMLLIElement & HTMLParamElement => isListItem(element) || isParagraph(element);
 
 export const getListItem = getAnchorParent(isListItem);
 export const getParagraph = getAnchorParent(isParagraph);

@@ -3,52 +3,63 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
+    import { getPlatformString, registerShortcut } from "@tslib/shortcuts";
+    import { createEventDispatcher, onDestroy } from "svelte";
+
     import Badge from "../components/Badge.svelte";
-    import * as tr from "../lib/ftl";
-    import { onMount } from "svelte";
-    import { htmlOn, htmlOff } from "./icons";
-    import { getEditorField } from "./EditorField.svelte";
-    import { registerShortcut, getPlatformString } from "../lib/shortcuts";
+    import { context as editorFieldContext } from "./EditorField.svelte";
+    import { plainTextIcon } from "./icons";
 
-    const editorField = getEditorField();
+    const animated = !document.body.classList.contains("reduce-motion");
+
+    const editorField = editorFieldContext.get();
     const keyCombination = "Control+Shift+X";
+    const dispatch = createEventDispatcher();
 
+    export let show = false;
     export let off = false;
 
-    $: icon = off ? htmlOff : htmlOn;
-
     function toggle() {
-        off = !off;
+        dispatch("toggle");
     }
 
-    function shortcut(element: HTMLElement): void {
-        registerShortcut(toggle, keyCombination, element);
-    }
+    let unregister: ReturnType<typeof registerShortcut> | undefined;
 
-    onMount(() => editorField.element.then(shortcut));
+    editorField.element.then((target) => {
+        unregister = registerShortcut(toggle, keyCombination, { target });
+    });
+
+    onDestroy(() => unregister?.());
 </script>
 
 <span
     class="plain-text-badge"
+    class:visible={show || !animated}
     class:highlighted={!off}
     on:click|stopPropagation={toggle}
 >
     <Badge
         tooltip="{tr.editingToggleHtmlEditor()} ({getPlatformString(keyCombination)})"
         iconSize={80}
-        --icon-align="text-top">{@html icon}</Badge
     >
+        {@html plainTextIcon}
+    </Badge>
 </span>
 
 <style lang="scss">
     span {
-        opacity: 0.4;
+        cursor: pointer;
+        opacity: 0;
 
+        &.visible {
+            opacity: 0.4;
+            &:hover {
+                opacity: 0.8;
+            }
+        }
         &.highlighted {
             opacity: 1;
-        }
-        &:hover {
-            opacity: 0.8;
         }
     }
 </style>

@@ -1,10 +1,13 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{
-    interval_kind::IntervalKind, LearnState, NewState, NextCardStates, RelearnState, ReviewState,
-    StateContext,
-};
+use super::interval_kind::IntervalKind;
+use super::LearnState;
+use super::NewState;
+use super::RelearnState;
+use super::ReviewState;
+use super::SchedulingStates;
+use super::StateContext;
 use crate::revlog::RevlogReviewKind;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,17 +37,19 @@ impl NormalState {
         }
     }
 
-    pub(crate) fn next_states(self, ctx: &StateContext) -> NextCardStates {
+    pub(crate) fn next_states(self, ctx: &StateContext) -> SchedulingStates {
         match self {
             NormalState::New(_) => {
                 // New state acts like answering a failed learning card
                 let next_states = LearnState {
                     remaining_steps: ctx.steps.remaining_for_failed(),
                     scheduled_secs: 0,
+                    elapsed_secs: 0,
+                    memory_state: None,
                 }
                 .next_states(ctx);
                 // .. but with current as New, not Learning
-                NextCardStates {
+                SchedulingStates {
                     current: self.into(),
                     ..next_states
                 }

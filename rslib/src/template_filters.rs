@@ -5,21 +5,23 @@ use std::borrow::Cow;
 
 use blake3::Hasher;
 use lazy_static::lazy_static;
-use regex::{Captures, Regex};
+use regex::Captures;
+use regex::Regex;
 
-use crate::{
-    cloze::{cloze_filter, cloze_only_filter},
-    template::RenderContext,
-    text::strip_html,
-};
+use crate::cloze::cloze_filter;
+use crate::cloze::cloze_only_filter;
+use crate::template::RenderContext;
+use crate::text::strip_html;
 
 // Filtering
 //----------------------------------------
 
-/// Applies built in filters, returning the resulting text and remaining filters.
+/// Applies built in filters, returning the resulting text and remaining
+/// filters.
 ///
-/// The first non-standard filter that is encountered will terminate processing,
-/// so non-standard filters must come at the end.
+/// If [context.partial_for_python] is true, the first non-standard filter that
+/// is encountered will terminate processing, so non-standard filters must come
+/// at the end. If false, missing filters are ignored.
 pub(crate) fn apply_filters<'a>(
     text: &'a str,
     filters: &[&str],
@@ -45,11 +47,14 @@ pub(crate) fn apply_filters<'a>(
                 text = output.into();
             }
             (false, _) => {
-                // unrecognized filter, return current text and remaining filters
-                return (
-                    text,
-                    filters.iter().skip(idx).map(ToString::to_string).collect(),
-                );
+                // unrecognized filter
+                if context.partial_for_python {
+                    //  return current text and remaining filters
+                    return (
+                        text,
+                        filters.iter().skip(idx).map(ToString::to_string).collect(),
+                    );
+                }
             }
         }
     }
@@ -62,9 +67,9 @@ pub(crate) fn apply_filters<'a>(
 ///
 /// Returns true if filter was valid.
 /// Returns string if input text changed.
-fn apply_filter<'a>(
+fn apply_filter(
     filter_name: &str,
-    text: &'a str,
+    text: &str,
     field_name: &str,
     context: &RenderContext,
 ) -> (bool, Option<String>) {
@@ -213,6 +218,7 @@ mod test {
         );
     }
 
+    #[allow(clippy::needless_raw_string_hashes)]
     #[test]
     fn hint() {
         assert_eq!(
@@ -235,8 +241,9 @@ field</a>
         let ctx = RenderContext {
             fields: &Default::default(),
             nonempty_fields: &Default::default(),
-            question_side: false,
+            frontside: Some(""),
             card_ord: 0,
+            partial_for_python: true,
         };
         assert_eq!(
             apply_filters("ignored", &["cloze", "type"], "Text", &ctx),
@@ -250,19 +257,20 @@ field</a>
         let mut ctx = RenderContext {
             fields: &Default::default(),
             nonempty_fields: &Default::default(),
-            question_side: true,
+            frontside: None,
             card_ord: 0,
+            partial_for_python: true,
         };
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "[...] two");
         assert_eq!(
             cloze_filter(text, &ctx),
-            "<span class=cloze>[...]</span> two"
+            r#"<span class="cloze" data-cloze="one" data-ordinal="1">[...]</span> <span class="cloze-inactive" data-ordinal="2">two</span>"#
         );
 
         ctx.card_ord = 1;
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "one [hint]");
 
-        ctx.question_side = false;
+        ctx.frontside = Some("");
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "one two");
 
         // if the provided ordinal did not match any cloze deletions,

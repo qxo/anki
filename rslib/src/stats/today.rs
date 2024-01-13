@@ -1,7 +1,10 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{i18n::I18n, prelude::*, scheduler::timespan::Timespan};
+use anki_i18n::I18n;
+
+use crate::prelude::*;
+use crate::scheduler::timespan::Timespan;
 
 pub fn studied_today(cards: u32, secs: f32, tr: &I18n) -> String {
     let span = Timespan::from_secs(secs).natural_span();
@@ -26,15 +29,16 @@ impl Collection {
 
 #[cfg(test)]
 mod test {
+    use anki_i18n::I18n;
+
     use super::studied_today;
-    use crate::i18n::I18n;
 
     #[test]
     fn today() {
         // temporary test of fluent term handling
         let tr = I18n::template_only();
         assert_eq!(
-            &studied_today(3, 13.0, &tr).replace("\n", " "),
+            &studied_today(3, 13.0, &tr).replace('\n', " "),
             "Studied 3 cards in 13 seconds today (4.33s/card)"
         );
     }

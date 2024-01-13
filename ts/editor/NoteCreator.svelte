@@ -3,15 +3,16 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { onMount, onDestroy } from "svelte";
-    import { bridgeCommand } from "../lib/bridgecommand";
-    import { registerShortcut } from "../lib/shortcuts";
+    import { bridgeCommand } from "@tslib/bridgecommand";
+    import { registerShortcut } from "@tslib/shortcuts";
+    import { onDestroy, onMount } from "svelte";
+
+    import type { NoteEditorAPI } from "./NoteEditor.svelte";
+    import NoteEditor from "./NoteEditor.svelte";
     import StickyBadge from "./StickyBadge.svelte";
-    import OldEditorAdapter from "./OldEditorAdapter.svelte";
-    import type { NoteEditorAPI } from "./OldEditorAdapter.svelte";
 
     const api: Partial<NoteEditorAPI> = {};
-    let noteEditor: OldEditorAdapter;
+    let noteEditor: NoteEditor;
 
     export let uiResolve: (api: NoteEditorAPI) => void;
 
@@ -43,8 +44,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     onDestroy(() => deregisterSticky);
 </script>
 
-<OldEditorAdapter bind:this={noteEditor} {api}>
-    <svelte:fragment slot="field-state" let:index>
-        <StickyBadge active={stickies[index]} {index} />
+<NoteEditor bind:this={noteEditor} {api}>
+    <svelte:fragment slot="field-state" let:index let:show>
+        <StickyBadge bind:active={stickies[index]} {index} {show} />
     </svelte:fragment>
-</OldEditorAdapter>
+</NoteEditor>

@@ -3,26 +3,27 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import ConfigSelector from "./ConfigSelector.svelte";
+    import type { Writable } from "svelte/store";
+
     import Container from "../components/Container.svelte";
     import Row from "../components/Row.svelte";
+    import type { DynamicSvelteComponent } from "../sveltelib/dynamicComponent";
+    import Addons from "./Addons.svelte";
+    import AdvancedOptions from "./AdvancedOptions.svelte";
+    import AudioOptions from "./AudioOptions.svelte";
+    import AutoAdvance from "./AutoAdvance.svelte";
+    import BuryOptions from "./BuryOptions.svelte";
+    import ConfigSelector from "./ConfigSelector.svelte";
     import DailyLimits from "./DailyLimits.svelte";
     import DisplayOrder from "./DisplayOrder.svelte";
-    import NewOptions from "./NewOptions.svelte";
-    import AdvancedOptions from "./AdvancedOptions.svelte";
-    import BuryOptions from "./BuryOptions.svelte";
-    import LapseOptions from "./LapseOptions.svelte";
-    import TimerOptions from "./TimerOptions.svelte";
-    import AudioOptions from "./AudioOptions.svelte";
-    import Addons from "./Addons.svelte";
-
-    import type { DeckOptionsState } from "./lib";
-    import type { Writable } from "svelte/store";
     import HtmlAddon from "./HtmlAddon.svelte";
-    import type { DynamicSvelteComponent } from "../sveltelib/dynamicComponent";
+    import LapseOptions from "./LapseOptions.svelte";
+    import type { DeckOptionsState } from "./lib";
+    import NewOptions from "./NewOptions.svelte";
+    import TimerOptions from "./TimerOptions.svelte";
 
     export let state: DeckOptionsState;
-    let addons = state.addonComponents;
+    const addons = state.addonComponents;
 
     export function auxData(): Writable<Record<string, unknown>> {
         return state.currentAuxData;
@@ -51,57 +52,65 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     export const displayOrder = {};
     export const timerOptions = {};
     export const audioOptions = {};
-    export const addonOptions = {};
     export const advancedOptions = {};
+
+    let onPresetChange: () => void;
 </script>
 
-<ConfigSelector {state} />
+<ConfigSelector {state} on:presetchange={onPresetChange} />
 
 <div class="deck-options-page">
     <Container
         breakpoint="sm"
         --gutter-inline="0.25rem"
-        --gutter-block="0.5rem"
+        --gutter-block="0.75rem"
         class="container-columns"
-        api={options}
     >
-        <Row class="row-columns">
-            <DailyLimits {state} api={dailyLimits} />
-        </Row>
+        <div>
+            <Row class="row-columns">
+                <DailyLimits {state} api={dailyLimits} bind:onPresetChange />
+            </Row>
 
-        <Row class="row-columns">
-            <NewOptions {state} api={newOptions} />
-        </Row>
+            <Row class="row-columns">
+                <NewOptions {state} api={newOptions} />
+            </Row>
 
-        <Row class="row-columns">
-            <LapseOptions {state} api={lapseOptions} />
-        </Row>
+            <Row class="row-columns">
+                <LapseOptions {state} api={lapseOptions} />
+            </Row>
 
-        {#if state.v3Scheduler}
             <Row class="row-columns">
                 <DisplayOrder {state} api={displayOrder} />
             </Row>
-        {/if}
 
-        <Row class="row-columns">
-            <TimerOptions {state} api={timerOptions} />
-        </Row>
+            <Row class="row-columns">
+                <BuryOptions {state} api={buryOptions} />
+            </Row>
+        </div>
 
-        <Row class="row-columns">
-            <BuryOptions {state} api={buryOptions} />
-        </Row>
+        <div>
+            <Row class="row-columns">
+                <AudioOptions {state} api={audioOptions} />
+            </Row>
 
-        <Row class="row-columns">
-            <AudioOptions {state} api={audioOptions} />
-        </Row>
+            <Row class="row-columns">
+                <TimerOptions {state} api={timerOptions} />
+            </Row>
 
-        <Row class="row-columns">
-            <Addons {state} api={addonOptions} />
-        </Row>
+            <Row class="row-columns">
+                <AutoAdvance {state} api={timerOptions} />
+            </Row>
 
-        <Row class="row-columns">
-            <AdvancedOptions {state} api={advancedOptions} />
-        </Row>
+            {#if $addons.length}
+                <Row class="row-columns">
+                    <Addons {state} />
+                </Row>
+            {/if}
+
+            <Row class="row-columns">
+                <AdvancedOptions {state} api={advancedOptions} />
+            </Row>
+        </div>
     </Container>
 </div>
 
@@ -111,22 +120,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     .deck-options-page {
         overflow-x: hidden;
 
+        :global(.container-columns) {
+            display: grid;
+            gap: 20px;
+        }
+
         @include bp.with-breakpoint("lg") {
-            :global(.container) {
-                display: block;
-            }
-
             :global(.container-columns) {
-                column-count: 2;
-                column-gap: 5em;
-
-                :global(.container) {
-                    break-inside: avoid;
-                }
-            }
-
-            :global(.row-columns) {
-                display: block;
+                grid-template-columns: repeat(2, 1fr);
             }
         }
     }

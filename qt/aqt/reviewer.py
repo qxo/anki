@@ -3,24 +3,29 @@
 
 from __future__ import annotations
 
-import difflib
-import html
+import functools
 import json
 import random
 import re
-import unicodedata as ucd
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Callable, Literal, Match, Sequence, cast
+from typing import Any, Literal, Match, Sequence, cast
 
 import aqt
-from anki import hooks
+import aqt.browser
+import aqt.operations
 from anki.cards import Card, CardId
 from anki.collection import Config, OpChanges, OpChangesWithCount
-from anki.scheduler.v3 import CardAnswer, NextStates, QueuedCards
+from anki.scheduler.base import ScheduleCardsAsNew
+from anki.scheduler.v3 import CardAnswer, QueuedCards
 from anki.scheduler.v3 import Scheduler as V3Scheduler
+from anki.scheduler.v3 import (
+    SchedulingContext,
+    SchedulingStates,
+    SetSchedulingStatesRequest,
+)
 from anki.tags import MARKED_TAG
-from anki.utils import strip_html
+from anki.types import assert_exhaustive
 from aqt import AnkiQt, gui_hooks
 from aqt.browser.card_info import PreviousReviewerCardInfo, ReviewerCardInfo
 from aqt.deckoptions import confirm_deck_then_display_options
@@ -30,6 +35,7 @@ from aqt.operations.scheduling import (
     answer_card,
     bury_cards,
     bury_notes,
+    forget_cards,
     set_due_date_dialog,
     suspend_cards,
     suspend_note,
@@ -40,12 +46,20 @@ from aqt.qt import *
 from aqt.sound import av_player, play_clicked_audio, record_audio
 from aqt.theme import theme_manager
 from aqt.toolbar import BottomBar
-from aqt.utils import askUserDialog, downArrow, qtMenuShortcutWorkaround, tooltip, tr
+from aqt.utils import (
+    askUserDialog,
+    downArrow,
+    qtMenuShortcutWorkaround,
+    show_warning,
+    tooltip,
+    tr,
+)
 
 
 class RefreshNeeded(Enum):
     NOTE_TEXT = auto()
     QUEUES = auto()
+    FLAG = auto()
 
 
 class ReviewerBottomBar:
@@ -65,19 +79,23 @@ def replay_audio(card: Card, question_side: bool) -> None:
 
 @dataclass
 class V3CardInfo:
-    """2021 test scheduler info.
+    """Stores the top of the card queue for the v3 scheduler.
 
-    next_states is copied from the top card on initialization, and can be
-    mutated to alter the default scheduling.
+    This includes current and potential next states of the displayed card,
+    which may be mutated by a user's custom scheduling.
     """
 
     queued_cards: QueuedCards
-    next_states: NextStates
+    states: SchedulingStates
+    context: SchedulingContext
 
     @staticmethod
     def from_queue(queued_cards: QueuedCards) -> V3CardInfo:
+        top_card = queued_cards.cards[0]
+        states = top_card.states
+        states.current.custom_data = top_card.card.custom_data
         return V3CardInfo(
-            queued_cards=queued_cards, next_states=queued_cards.cards[0].next_states
+            queued_cards=queued_cards, states=states, context=top_card.context
         )
 
     def top_card(self) -> QueuedCards.QueuedCard:
@@ -111,35 +129,47 @@ class V3CardInfo:
             return CardAnswer.EASY
 
 
+class AnswerAction(Enum):
+    BURY_CARD = 0
+    ANSWER_AGAIN = 1
+    ANSWER_GOOD = 2
+    ANSWER_HARD = 3
+    SHOW_REMINDER = 4
+
+
 class Reviewer:
     def __init__(self, mw: AnkiQt) -> None:
         self.mw = mw
         self.web = mw.web
         self.card: Card | None = None
-        self.cardQueue: list[Card] = []
         self.previous_card: Card | None = None
-        self.hadCardQueue = False
         self._answeredIds: list[CardId] = []
         self._recordedAudio: str | None = None
         self.typeCorrect: str = None  # web init happens before this is set
         self.state: Literal["question", "answer", "transition", None] = None
         self._refresh_needed: RefreshNeeded | None = None
         self._v3: V3CardInfo | None = None
-        self._state_mutation_key = str(random.randint(0, 2 ** 64 - 1))
+        self._state_mutation_key = str(random.randint(0, 2**64 - 1))
         self.bottom = BottomBar(mw, mw.bottomWeb)
         self._card_info = ReviewerCardInfo(self.mw)
         self._previous_card_info = PreviousReviewerCardInfo(self.mw)
-        hooks.card_did_leech.append(self.onLeech)
+        self._states_mutated = True
+        self._reps: int = None
+        self._show_question_timer: QTimer | None = None
+        self._show_answer_timer: QTimer | None = None
+        self.auto_advance_enabled = False
+        gui_hooks.av_player_did_end_playing.append(self._on_av_player_did_end_playing)
 
     def show(self) -> None:
-        if self.mw.col.sched_ver() == 1:
+        if self.mw.col.sched_ver() == 1 or not self.mw.col.v3_scheduler():
             self.mw.moveToState("deckBrowser")
+            show_warning(tr.scheduling_update_required().replace("V2", "v3"))
             return
         self.mw.setStateShortcuts(self._shortcutKeys())  # type: ignore
         self.web.set_bridge_command(self._linkHandler, self)
         self.bottom.web.set_bridge_command(self._linkHandler, ReviewerBottomBar(self))
         self._state_mutation_js = self.mw.col.get_config("cardStateCustomizer")
-        self._reps: int = None
+        self._reps = None
         self._refresh_needed = RefreshNeeded.QUEUES
         self.refresh_if_needed()
 
@@ -157,10 +187,10 @@ class Reviewer:
     def cleanup(self) -> None:
         gui_hooks.reviewer_will_end()
         self.card = None
+        self.auto_advance_enabled = False
 
     def refresh_if_needed(self) -> None:
         if self._refresh_needed is RefreshNeeded.QUEUES:
-            self.mw.col.reset()
             self.nextCard()
             self.mw.fade_in_webview()
             self._refresh_needed = None
@@ -168,6 +198,14 @@ class Reviewer:
             self._redraw_current_card()
             self.mw.fade_in_webview()
             self._refresh_needed = None
+        elif self._refresh_needed is RefreshNeeded.FLAG:
+            self.card.load()
+            self._update_flag_icon()
+            # for when modified in browser
+            self.mw.fade_in_webview()
+            self._refresh_needed = None
+        elif self._refresh_needed:
+            assert_exhaustive(self._refresh_needed)
 
     def op_executed(
         self, changes: OpChanges, handler: object | None, focused: bool
@@ -177,6 +215,8 @@ class Reviewer:
                 self._refresh_needed = RefreshNeeded.QUEUES
             elif changes.note_text:
                 self._refresh_needed = RefreshNeeded.NOTE_TEXT
+            elif changes.card:
+                self._refresh_needed = RefreshNeeded.FLAG
 
         if focused and self._refresh_needed:
             self.refresh_if_needed()
@@ -197,11 +237,7 @@ class Reviewer:
         self.previous_card = self.card
         self.card = None
         self._v3 = None
-
-        if self.mw.col.sched.version < 3:
-            self._get_next_v1_v2_card()
-        else:
-            self._get_next_v3_card()
+        self._get_next_v3_card()
 
         self._previous_card_info.set_card(self.previous_card)
         self._card_info.set_card(self.card)
@@ -210,26 +246,10 @@ class Reviewer:
             self.mw.moveToState("overview")
             return
 
-        if self._reps is None or self._reps % 100 == 0:
-            # we recycle the webview periodically so webkit can free memory
+        if self._reps is None:
             self._initWeb()
 
         self._showQuestion()
-
-    def _get_next_v1_v2_card(self) -> None:
-        if self.cardQueue:
-            # undone/edited cards to show
-            card = self.cardQueue.pop()
-            card.start_timer()
-            self.hadCardQueue = True
-        else:
-            if self.hadCardQueue:
-                # the undone/edited cards may be sitting in the regular queue;
-                # need to reset
-                self.mw.col.reset()
-                self.hadCardQueue = False
-            card = self.mw.col.sched.getCard()
-        self.card = card
 
     def _get_next_v3_card(self) -> None:
         assert isinstance(self.mw.col.sched, V3Scheduler)
@@ -240,23 +260,29 @@ class Reviewer:
         self.card = Card(self.mw.col, backend_card=self._v3.top_card().card)
         self.card.start_timer()
 
-    def get_next_states(self) -> NextStates | None:
-        if v3 := self._v3:
-            return v3.next_states
-        else:
-            return None
+    def get_scheduling_states(self) -> SchedulingStates:
+        return self._v3.states
 
-    def set_next_states(self, key: str, states: NextStates) -> None:
-        if key != self._state_mutation_key:
+    def get_scheduling_context(self) -> SchedulingContext:
+        return self._v3.context
+
+    def set_scheduling_states(self, request: SetSchedulingStatesRequest) -> None:
+        if request.key != self._state_mutation_key:
             return
 
-        if v3 := self._v3:
-            v3.next_states = states
+        self._v3.states = request.states
 
     def _run_state_mutation_hook(self) -> None:
-        if self._v3 and (js := self._state_mutation_js):
-            self.web.eval(
-                f"anki.mutateNextCardStates('{self._state_mutation_key}', (states) => {{ {js} }})"
+        def on_eval(result: Any) -> None:
+            if result is None:
+                # eval failed, usually a syntax error
+                self._states_mutated = True
+
+        if js := self._state_mutation_js:
+            self._states_mutated = False
+            self.web.evalWithCallback(
+                RUN_STATE_MUTATION.format(key=self._state_mutation_key, js=js),
+                on_eval,
             )
 
     # Audio
@@ -267,6 +293,24 @@ class Reviewer:
             replay_audio(self.card, True)
         elif self.state == "answer":
             replay_audio(self.card, False)
+        gui_hooks.audio_will_replay(self.web, self.card, self.state == "question")
+
+    def _on_av_player_did_end_playing(self, *args) -> None:
+        def task() -> None:
+            if av_player.queue_is_empty():
+                if (
+                    self._show_question_timer
+                    and self._show_question_timer.remainingTime() <= 0
+                ):
+                    self._on_show_question_timeout()
+                elif (
+                    self._show_answer_timer
+                    and self._show_answer_timer.remainingTime() <= 0
+                ):
+                    self._on_show_answer_timeout()
+
+        # Allow time for audio queue to update
+        self.mw.taskman.run_on_main(lambda: self.mw.progress.single_shot(100, task))
 
     # Initializing the webview
     ##########################################################################
@@ -292,13 +336,15 @@ class Reviewer:
             css=["css/reviewer.css"],
             js=[
                 "js/mathjax.js",
-                "js/vendor/mathjax/tex-chtml.js",
+                "js/vendor/mathjax/tex-chtml-full.js",
                 "js/reviewer.js",
             ],
             context=self,
         )
+        # block default drag & drop behavior while allowing drop events to be received by JS handlers
+        self.web.allow_drops = True
+        self.web.eval("_blockDefaultDragDropBehavior();")
         # show answer / ease buttons
-        self.bottom.web.show()
         self.bottom.web.stdHtml(
             self._bottomHTML(),
             css=["css/toolbar-bottom.css", "css/reviewer-bottom.css"],
@@ -324,13 +370,12 @@ class Reviewer:
             self.web.setPlaybackRequiresGesture(False)
             sounds = c.question_av_tags()
             gui_hooks.reviewer_will_play_question_sounds(c, sounds)
-            av_player.play_tags(sounds)
         else:
             self.web.setPlaybackRequiresGesture(True)
-            av_player.clear_queue_and_maybe_interrupt()
             sounds = []
             gui_hooks.reviewer_will_play_question_sounds(c, sounds)
-            av_player.play_tags(sounds)
+        gui_hooks.av_player_will_play_tags(sounds, self.state, self)
+        av_player.play_tags(sounds)
         # render & update bottom
         q = self._mungeQA(q)
         q = gui_hooks.card_will_show(q, c, "reviewQuestion")
@@ -348,6 +393,36 @@ class Reviewer:
         self.mw.web.setFocus()
         # user hook
         gui_hooks.reviewer_did_show_question(c)
+        self._auto_advance_to_answer_if_enabled()
+
+    def _auto_advance_to_answer_if_enabled(self) -> None:
+        self._clear_auto_advance_timers()
+        if self.auto_advance_enabled:
+            conf = self.mw.col.decks.config_dict_for_deck_id(
+                self.card.current_deck_id()
+            )
+            if conf["secondsToShowQuestion"]:
+                self._show_answer_timer = self.mw.progress.timer(
+                    int(conf["secondsToShowQuestion"] * 1000),
+                    self._on_show_answer_timeout,
+                    repeat=False,
+                    parent=self.mw,
+                )
+
+    def _on_show_answer_timeout(self) -> None:
+        if self.card is None:
+            return
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        if conf["waitForAudio"] and av_player.current_player:
+            return
+        if (
+            not self.auto_advance_enabled
+            or not self.mw.app.focusWidget()
+            or self.mw.app.focusWidget().window() != self.mw
+        ):
+            self.auto_advance_enabled = False
+            return
+        self._showAnswer()
 
     def autoplay(self, card: Card) -> bool:
         print("use card.autoplay() instead of reviewer.autoplay(card)")
@@ -376,12 +451,11 @@ class Reviewer:
         if c.autoplay():
             sounds = c.answer_av_tags()
             gui_hooks.reviewer_will_play_answer_sounds(c, sounds)
-            av_player.play_tags(sounds)
         else:
-            av_player.clear_queue_and_maybe_interrupt()
             sounds = []
             gui_hooks.reviewer_will_play_answer_sounds(c, sounds)
-            av_player.play_tags(sounds)
+        gui_hooks.av_player_will_play_tags(sounds, self.state, self)
+        av_player.play_tags(sounds)
         a = self._mungeQA(a)
         a = gui_hooks.card_will_show(a, c, "reviewAnswer")
         # render and update bottom
@@ -390,6 +464,49 @@ class Reviewer:
         self.mw.web.setFocus()
         # user hook
         gui_hooks.reviewer_did_show_answer(c)
+        self._auto_advance_to_question_if_enabled()
+
+    def _auto_advance_to_question_if_enabled(self) -> None:
+        self._clear_auto_advance_timers()
+        if self.auto_advance_enabled:
+            conf = self.mw.col.decks.config_dict_for_deck_id(
+                self.card.current_deck_id()
+            )
+            if conf["secondsToShowAnswer"]:
+                self._show_question_timer = self.mw.progress.timer(
+                    int(conf["secondsToShowAnswer"] * 1000),
+                    self._on_show_question_timeout,
+                    repeat=False,
+                    parent=self.mw,
+                )
+
+    def _on_show_question_timeout(self) -> None:
+        if self.card is None:
+            return
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        if conf["waitForAudio"] and av_player.current_player:
+            return
+        if (
+            not self.auto_advance_enabled
+            or not self.mw.app.focusWidget()
+            or self.mw.app.focusWidget().window() != self.mw
+        ):
+            self.auto_advance_enabled = False
+            return
+        try:
+            answer_action = list(AnswerAction)[conf["answerAction"]]
+        except IndexError:
+            answer_action = AnswerAction.ANSWER_GOOD
+        if answer_action == AnswerAction.BURY_CARD:
+            self.bury_current_card()
+        elif answer_action == AnswerAction.ANSWER_AGAIN:
+            self._answerCard(1)
+        elif answer_action == AnswerAction.ANSWER_HARD:
+            self._answerCard(2)
+        elif answer_action == AnswerAction.SHOW_REMINDER:
+            tooltip(tr.studying_answer_time_elapsed())
+        else:
+            self._answerCard(3)
 
     # Answering a card
     ############################################################
@@ -401,43 +518,59 @@ class Reviewer:
             return
         if self.state != "answer":
             return
-        if self.mw.col.sched.answerButtons(self.card) < ease:
-            return
         proceed, ease = gui_hooks.reviewer_will_answer_card(
             (True, ease), self, self.card
         )
         if not proceed:
             return
 
-        if (v3 := self._v3) and (sched := cast(V3Scheduler, self.mw.col.sched)):
-            answer = sched.build_answer(
-                card=self.card, states=v3.next_states, rating=v3.rating_from_ease(ease)
-            )
+        sched = cast(V3Scheduler, self.mw.col.sched)
+        answer = sched.build_answer(
+            card=self.card,
+            states=self._v3.states,
+            rating=self._v3.rating_from_ease(ease),
+        )
 
-            def after_answer(changes: OpChanges) -> None:
-                if gui_hooks.reviewer_did_answer_card.count() > 0:
-                    self.card.load()
-                self._after_answering(ease)
-                if sched.state_is_leech(answer.new_state):
-                    self.onLeech()
-
-            self.state = "transition"
-            answer_card(parent=self.mw, answer=answer).success(
-                after_answer
-            ).run_in_background(initiator=self)
-        else:
-            self.mw.col.sched.answerCard(self.card, ease)
+        def after_answer(changes: OpChanges) -> None:
+            if gui_hooks.reviewer_did_answer_card.count() > 0:
+                self.card.load()
             self._after_answering(ease)
+            if sched.state_is_leech(answer.new_state):
+                self.onLeech()
+
+        self.state = "transition"
+        answer_card(parent=self.mw, answer=answer).success(
+            after_answer
+        ).run_in_background(initiator=self)
 
     def _after_answering(self, ease: Literal[1, 2, 3, 4]) -> None:
         gui_hooks.reviewer_did_answer_card(self, self.card, ease)
         self._answeredIds.append(self.card.id)
-        self.mw.autosave()
         if not self.check_timebox():
             self.nextCard()
 
     # Handlers
     ############################################################
+
+    def korean_shortcuts(
+        self,
+    ) -> Sequence[Union[tuple[str, Callable], tuple[Qt.Key, Callable]]]:
+        return [
+            ("ㄷ", self.mw.onEditCurrent),
+            ("ㅡ", self.showContextMenu),
+            ("ㄱ", self.replayAudio),
+            ("Ctrl+Alt+ㅜ", self.forget_current_card),
+            # does not work
+            # ("Ctrl+Alt+ㄷ", self.on_create_copy),
+            # does not work
+            # ("Ctrl+Shift+ㅇ", self.on_set_due),
+            ("ㅍ", self.onReplayRecorded),
+            ("Shift+ㅍ", self.onRecordVoice),
+            ("ㅐ", self.onOptions),
+            ("ㅑ", self.on_card_info),
+            ("Ctrl+Alt+ㅑ", self.on_previous_card_info),
+            ("ㅕ", self.mw.undo),
+        ]
 
     def _shortcutKeys(
         self,
@@ -459,38 +592,46 @@ class Reviewer:
             ("-", self.bury_current_card),
             ("!", self.suspend_current_note),
             ("@", self.suspend_current_card),
+            ("Ctrl+Alt+N", self.forget_current_card),
             ("Ctrl+Alt+E", self.on_create_copy),
-            ("Ctrl+Delete", self.delete_current_note),
+            ("Ctrl+Backspace" if is_mac else "Ctrl+Delete", self.delete_current_note),
             ("Ctrl+Shift+D", self.on_set_due),
             ("v", self.onReplayRecorded),
             ("Shift+v", self.onRecordVoice),
             ("o", self.onOptions),
             ("i", self.on_card_info),
             ("Ctrl+Alt+i", self.on_previous_card_info),
-            ("1", lambda: self._answerCard(1)),
-            ("2", lambda: self._answerCard(2)),
-            ("3", lambda: self._answerCard(3)),
-            ("4", lambda: self._answerCard(4)),
+            *(
+                (key, functools.partial(self._answerCard, ease))
+                for ease in aqt.mw.pm.default_answer_keys
+                if (key := aqt.mw.pm.get_answer_key(ease))
+            ),
+            ("u", self.mw.undo),
             ("5", self.on_pause_audio),
             ("6", self.on_seek_backward),
             ("7", self.on_seek_forward),
+            ("Shift+A", self.toggle_auto_advance),
+            *self.korean_shortcuts(),
         ]
 
     def on_pause_audio(self) -> None:
         av_player.toggle_pause()
+        gui_hooks.audio_did_pause_or_unpause(self.web)
 
     seek_secs = 5
 
     def on_seek_backward(self) -> None:
         av_player.seek_relative(-self.seek_secs)
+        gui_hooks.audio_did_seek_relative(self.web, -self.seek_secs)
 
     def on_seek_forward(self) -> None:
         av_player.seek_relative(self.seek_secs)
+        gui_hooks.audio_did_seek_relative(self.web, self.seek_secs)
 
     def onEnterKey(self) -> None:
         if self.state == "question":
             self._getTypedAnswer()
-        elif self.state == "answer":
+        elif self.state == "answer" and aqt.mw.pm.spacebar_rates_card():
             self.bottom.web.evalWithCallback(
                 "selectedAnswerButton()", self._onAnswerButton
             )
@@ -515,6 +656,10 @@ class Reviewer:
             self.showContextMenu()
         elif url.startswith("play:"):
             play_clicked_audio(url, self.card)
+        elif url.startswith("updateToolbar"):
+            self.mw.toolbarWeb.update_background_image()
+        elif url == "statesMutated":
+            self._states_mutated = True
         else:
             print("unrecognized anki link:", url)
 
@@ -578,27 +723,19 @@ class Reviewer:
         origSize = len(buf)
         buf = buf.replace("<hr id=answer>", "")
         hadHR = len(buf) != origSize
-        # munge correct value
-        cor = self.mw.col.media.strip(self.typeCorrect)
-        cor = re.sub("(\n|<br ?/?>|</?div>)+", " ", cor)
-        cor = strip_html(cor)
-        # ensure we don't chomp multiple whitespace
-        cor = cor.replace(" ", "&nbsp;")
-        cor = html.unescape(cor)
-        cor = cor.replace("\xa0", " ")
-        cor = cor.strip()
-        given = self.typedAnswer
-        # compare with typed answer
-        res = self.correct(given, cor, showBad=False)
+        expected = self.typeCorrect
+        provided = self.typedAnswer
+        output = self.mw.col.compare_answer(expected, provided)
+
         # and update the type answer area
         def repl(match: Match) -> str:
             # can't pass a string in directly, and can't use re.escape as it
             # escapes too much
             s = """
-<span style="font-family: '{}'; font-size: {}px">{}</span>""".format(
+<div style="font-family: '{}'; font-size: {}px">{}</div>""".format(
                 self.typeFont,
                 self.typeSize,
-                res,
+                output,
             )
             if hadHR:
                 # a hack to ensure the q/a separator falls before the answer
@@ -608,101 +745,8 @@ class Reviewer:
 
         return re.sub(self.typeAnsPat, repl, buf)
 
-    def _contentForCloze(self, txt: str, idx: int) -> str:
-        matches = re.findall(r"\{\{c%s::(.+?)\}\}" % idx, txt, re.DOTALL)
-        if not matches:
-            return None
-
-        def noHint(txt: str) -> str:
-            if "::" in txt:
-                return txt.split("::")[0]
-            return txt
-
-        matches = [noHint(txt) for txt in matches]
-        uniqMatches = set(matches)
-        if len(uniqMatches) == 1:
-            txt = matches[0]
-        else:
-            txt = ", ".join(matches)
-        return txt
-
-    def tokenizeComparison(
-        self, given: str, correct: str
-    ) -> tuple[list[tuple[bool, str]], list[tuple[bool, str]]]:
-        # compare in NFC form so accents appear correct
-        given = ucd.normalize("NFC", given)
-        correct = ucd.normalize("NFC", correct)
-        s = difflib.SequenceMatcher(None, given, correct, autojunk=False)
-        givenElems: list[tuple[bool, str]] = []
-        correctElems: list[tuple[bool, str]] = []
-        givenPoint = 0
-        correctPoint = 0
-        offby = 0
-
-        def logBad(old: int, new: int, s: str, array: list[tuple[bool, str]]) -> None:
-            if old != new:
-                array.append((False, s[old:new]))
-
-        def logGood(
-            start: int, cnt: int, s: str, array: list[tuple[bool, str]]
-        ) -> None:
-            if cnt:
-                array.append((True, s[start : start + cnt]))
-
-        for x, y, cnt in s.get_matching_blocks():
-            # if anything was missed in correct, pad given
-            if cnt and y - offby > x:
-                givenElems.append((False, "-" * (y - x - offby)))
-                offby = y - x
-            # log any proceeding bad elems
-            logBad(givenPoint, x, given, givenElems)
-            logBad(correctPoint, y, correct, correctElems)
-            givenPoint = x + cnt
-            correctPoint = y + cnt
-            # log the match
-            logGood(x, cnt, given, givenElems)
-            logGood(y, cnt, correct, correctElems)
-        return givenElems, correctElems
-
-    def correct(self, given: str, correct: str, showBad: bool = True) -> str:
-        "Diff-corrects the typed-in answer."
-        givenElems, correctElems = self.tokenizeComparison(given, correct)
-
-        def good(s: str) -> str:
-            return f"<span class=typeGood>{html.escape(s)}</span>"
-
-        def bad(s: str) -> str:
-            return f"<span class=typeBad>{html.escape(s)}</span>"
-
-        def missed(s: str) -> str:
-            return f"<span class=typeMissed>{html.escape(s)}</span>"
-
-        if given == correct:
-            res = good(given)
-        else:
-            res = ""
-            for ok, txt in givenElems:
-                txt = self._noLoneMarks(txt)
-                if ok:
-                    res += good(txt)
-                else:
-                    res += bad(txt)
-            res += "<br><span id=typearrow>&darr;</span><br>"
-            for ok, txt in correctElems:
-                txt = self._noLoneMarks(txt)
-                if ok:
-                    res += good(txt)
-                else:
-                    res += missed(txt)
-        res = f"<div><code id=typeans>{res}</code></div>"
-        return res
-
-    def _noLoneMarks(self, s: str) -> str:
-        # ensure a combining character at the start does not join to
-        # previous text
-        if s and ucd.category(s[0]).startswith("M"):
-            return f"\xa0{s}"
-        return s
+    def _contentForCloze(self, txt: str, idx: int) -> str | None:
+        return self.mw.col.extract_cloze_for_typing(txt, idx) or None
 
     def _getTypedAnswer(self) -> None:
         self.web.evalWithCallback("getTypedAnswer();", self._onTypedAnswer)
@@ -719,37 +763,38 @@ class Reviewer:
 <center id=outer>
 <table id=innertable width=100%% cellspacing=0 cellpadding=0>
 <tr>
-<td align=left width=50 valign=top class=stat>
-<br>
+<td align=start valign=top class=stat>
 <button title="%(editkey)s" onclick="pycmd('edit');">%(edit)s</button></td>
 <td align=center valign=top id=middle>
 </td>
-<td width=50 align=right valign=top class=stat><span id=time class=stattxt>
-</span><br>
-<button onclick="pycmd('more');">%(more)s %(downArrow)s</button>
+<td align=end valign=top class=stat>
+<button title="%(morekey)s" onclick="pycmd('more');">
+%(more)s %(downArrow)s
+<span id=time class=stattxt></span>
+</button>
 </td>
 </tr>
 </table>
 </center>
 <script>
 time = %(time)d;
+timerStopped = false;
 </script>
 """ % dict(
-            rem=self._remaining(),
             edit=tr.studying_edit(),
             editkey=tr.actions_shortcut_key(val="E"),
             more=tr.studying_more(),
+            morekey=tr.actions_shortcut_key(val="M"),
             downArrow=downArrow(),
             time=self.card.time_taken() // 1000,
         )
 
     def _showAnswerButton(self) -> None:
         middle = """
-<span class=stattxt>{}</span><br>
-<button title="{}" id="ansbut" class="focus" onclick='pycmd("ans");'>{}</button>""".format(
-            self._remaining(),
+<button title="{}" id="ansbut" onclick='pycmd("ans");'>{}<span class=stattxt>{}</span></button>""".format(
             tr.actions_shortcut_key(val=tr.studying_space()),
             tr.studying_show_answer(),
+            self._remaining(),
         )
         # wrap it in a table so it has the same top margin as the ease buttons
         middle = (
@@ -761,29 +806,24 @@ time = %(time)d;
         else:
             maxTime = 0
         self.bottom.web.eval("showQuestion(%s,%d);" % (json.dumps(middle), maxTime))
-        self.bottom.web.adjustHeightToFit()
 
     def _showEaseButtons(self) -> None:
+        if not self._states_mutated:
+            self.mw.progress.single_shot(50, self._showEaseButtons)
+            return
         middle = self._answerButtons()
-        self.bottom.web.eval(f"showAnswer({json.dumps(middle)});")
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        self.bottom.web.eval(
+            f"showAnswer({json.dumps(middle)}, {json.dumps(conf['stopTimerOnAnswer'])});"
+        )
 
     def _remaining(self) -> str:
         if not self.mw.col.conf["dueCounts"]:
             return ""
 
         counts: list[Union[int, str]]
-        if v3 := self._v3:
-            idx, counts_ = v3.counts()
-            counts = cast(list[Union[int, str]], counts_)
-        else:
-            # v1/v2 scheduler
-            if self.hadCardQueue:
-                # if it's come from the undo queue, don't count it separately
-                counts = list(self.mw.col.sched.counts())
-            else:
-                counts = list(self.mw.col.sched.counts(self.card))
-            idx = self.mw.col.sched.countIdx(self.card)
-
+        idx, counts_ = self._v3.counts()
+        counts = cast(list[Union[int, str]], counts_)
         counts[idx] = f"<u>{counts[idx]}</u>"
 
         return f"""
@@ -793,10 +833,7 @@ time = %(time)d;
 """
 
     def _defaultEase(self) -> Literal[2, 3]:
-        if self.mw.col.sched.answerButtons(self.card) == 4:
-            return 3
-        else:
-            return 2
+        return 3
 
     def _answerButtonList(self) -> tuple[tuple[int, str], ...]:
         button_count = self.mw.col.sched.answerButtons(self.card)
@@ -826,43 +863,43 @@ time = %(time)d;
     def _answerButtons(self) -> str:
         default = self._defaultEase()
 
-        if v3 := self._v3:
-            assert isinstance(self.mw.col.sched, V3Scheduler)
-            labels = self.mw.col.sched.describe_next_states(v3.next_states)
-        else:
-            labels = None
+        assert isinstance(self.mw.col.sched, V3Scheduler)
+        labels = self.mw.col.sched.describe_next_states(self._v3.states)
 
         def but(i: int, label: str) -> str:
             if i == default:
-                extra = """id="defease" class="focus" """
+                extra = """id="defease" """
             else:
                 extra = ""
             due = self._buttonTime(i, v3_labels=labels)
+            key = (
+                tr.actions_shortcut_key(val=aqt.mw.pm.get_answer_key(i))
+                if aqt.mw.pm.get_answer_key(i)
+                else ""
+            )
             return """
-<td align=center>%s<button %s title="%s" data-ease="%s" onclick='pycmd("ease%d");'>\
-%s</button></td>""" % (
-                due,
+<td align=center><button %s title="%s" data-ease="%s" onclick='pycmd("ease%d");'>\
+%s%s</button></td>""" % (
                 extra,
-                tr.actions_shortcut_key(val=i),
+                key,
                 i,
                 i,
                 label,
+                due,
             )
 
-        buf = "<center><table cellpading=0 cellspacing=0><tr>"
+        buf = "<center><table cellpadding=0 cellspacing=0><tr>"
         for ease, label in self._answerButtonList():
             buf += but(ease, label)
         buf += "</tr></table>"
         return buf
 
-    def _buttonTime(self, i: int, v3_labels: Sequence[str] | None = None) -> str:
-        if not self.mw.col.conf["estTimes"]:
-            return "<div class=spacer></div>"
-        if v3_labels:
+    def _buttonTime(self, i: int, v3_labels: Sequence[str]) -> str:
+        if self.mw.col.conf["estTimes"]:
             txt = v3_labels[i - 1]
+            return f"""<span class="nobold">{txt}</span>"""
         else:
-            txt = self.mw.col.sched.nextIvlStr(self.card, i, True) or "&nbsp;"
-        return f"<span class=nobold>{txt}</span><br>"
+            return ""
 
     # Leeches
     ##########################################################################
@@ -916,6 +953,11 @@ time = %(time)d;
             ],
             [tr.studying_bury_card(), "-", self.bury_current_card],
             [
+                tr.actions_with_ellipsis(action=tr.actions_forget_card()),
+                "Ctrl+Alt+N",
+                self.forget_current_card,
+            ],
+            [
                 tr.actions_with_ellipsis(action=tr.actions_set_due_date()),
                 "Ctrl+Shift+D",
                 self.on_set_due,
@@ -933,7 +975,11 @@ time = %(time)d;
                 "Ctrl+Alt+E",
                 self.on_create_copy,
             ],
-            [tr.studying_delete_note(), "Ctrl+Delete", self.delete_current_note],
+            [
+                tr.studying_delete_note(),
+                "Ctrl+Backspace" if is_mac else "Ctrl+Delete",
+                self.delete_current_note,
+            ],
             None,
             [tr.actions_replay_audio(), "R", self.replayAudio],
             [tr.studying_pause_audio(), "5", self.on_pause_audio],
@@ -941,6 +987,12 @@ time = %(time)d;
             [tr.studying_audio_and5s(), "7", self.on_seek_forward],
             [tr.studying_record_own_voice(), "Shift+V", self.onRecordVoice],
             [tr.studying_replay_own_voice(), "V", self.onReplayRecorded],
+            [
+                tr.actions_auto_advance(),
+                "Shift+A",
+                self.toggle_auto_advance,
+                dict(checked=self.auto_advance_enabled),
+            ],
         ]
         return opts
 
@@ -951,7 +1003,7 @@ time = %(time)d;
 
         gui_hooks.reviewer_will_show_context_menu(self, m)
         qtMenuShortcutWorkaround(m)
-        m.exec(QCursor.pos())
+        m.popup(QCursor.pos())
 
     def _addMenuItems(self, m: QMenu, rows: Sequence) -> None:
         for row in rows:
@@ -980,16 +1032,12 @@ time = %(time)d;
         confirm_deck_then_display_options(self.card)
 
     def on_previous_card_info(self) -> None:
-        self._previous_card_info.toggle()
+        self._previous_card_info.show()
 
     def on_card_info(self) -> None:
-        self._card_info.toggle()
+        self._card_info.show()
 
     def set_flag_on_current_card(self, desired_flag: int) -> None:
-        def redraw_flag(out: OpChangesWithCount) -> None:
-            self.card.load()
-            self._update_flag_icon()
-
         # need to toggle off?
         if self.card.user_flag() == desired_flag:
             flag = 0
@@ -997,8 +1045,8 @@ time = %(time)d;
             flag = desired_flag
 
         set_card_flag(parent=self.mw, card_ids=[self.card.id], flag=flag).success(
-            redraw_flag
-        ).run_in_background(initiator=self)
+            lambda _: None
+        ).run_in_background()
 
     def set_flag_func(self, desired_flag: int) -> Callable:
         return lambda: self.set_flag_on_current_card(desired_flag)
@@ -1032,26 +1080,44 @@ time = %(time)d;
             op.run_in_background()
 
     def suspend_current_note(self) -> None:
+        gui_hooks.reviewer_will_suspend_note(self.card.nid)
         suspend_note(
             parent=self.mw,
             note_ids=[self.card.nid],
         ).success(lambda _: tooltip(tr.studying_note_suspended())).run_in_background()
 
     def suspend_current_card(self) -> None:
+        gui_hooks.reviewer_will_suspend_card(self.card.id)
         suspend_cards(
             parent=self.mw,
             card_ids=[self.card.id],
         ).success(lambda _: tooltip(tr.studying_card_suspended())).run_in_background()
 
     def bury_current_note(self) -> None:
-        bury_notes(parent=self.mw, note_ids=[self.card.nid],).success(
+        gui_hooks.reviewer_will_bury_note(self.card.nid)
+        bury_notes(
+            parent=self.mw,
+            note_ids=[self.card.nid],
+        ).success(
             lambda res: tooltip(tr.studying_cards_buried(count=res.count))
         ).run_in_background()
 
     def bury_current_card(self) -> None:
-        bury_cards(parent=self.mw, card_ids=[self.card.id],).success(
+        gui_hooks.reviewer_will_bury_card(self.card.id)
+        bury_cards(
+            parent=self.mw,
+            card_ids=[self.card.id],
+        ).success(
             lambda res: tooltip(tr.studying_cards_buried(count=res.count))
         ).run_in_background()
+
+    def forget_current_card(self) -> None:
+        if op := forget_cards(
+            parent=self.mw,
+            card_ids=[self.card.id],
+            context=ScheduleCardsAsNew.Context.REVIEWER,
+        ):
+            op.run_in_background()
 
     def on_create_copy(self) -> None:
         if self.card:
@@ -1075,10 +1141,35 @@ time = %(time)d;
         record_audio(self.mw, self.mw, False, after_record)
 
     def onReplayRecorded(self) -> None:
+        self._recordedAudio = gui_hooks.reviewer_will_replay_recording(
+            self._recordedAudio
+        )
         if not self._recordedAudio:
             tooltip(tr.studying_you_havent_recorded_your_voice_yet())
             return
         av_player.play_file(self._recordedAudio)
+
+    def _clear_auto_advance_timers(self) -> None:
+        if self._show_answer_timer:
+            self._show_answer_timer.deleteLater()
+            self._show_answer_timer = None
+        if self._show_question_timer:
+            self._show_question_timer.deleteLater()
+            self._show_question_timer = None
+
+    def toggle_auto_advance(self) -> None:
+        self.auto_advance_enabled = not self.auto_advance_enabled
+        if self.auto_advance_enabled:
+            tooltip(tr.actions_auto_advance_activated())
+        else:
+            tooltip(tr.actions_auto_advance_deactivated())
+        self.auto_advance_if_enabled()
+
+    def auto_advance_if_enabled(self) -> None:
+        if self.state == "question":
+            self._auto_advance_to_answer_if_enabled()
+        elif self.state == "answer":
+            self._auto_advance_to_question_if_enabled()
 
     # legacy
 
@@ -1089,3 +1180,9 @@ time = %(time)d;
     onDelete = delete_current_note
     onMark = toggle_mark_on_current_note
     setFlag = set_flag_on_current_card
+
+
+RUN_STATE_MUTATION = """
+anki.mutateNextCardStates('{key}', async (states, customData, ctx) => {{ {js} }})
+    .finally(() => bridgeCommand('statesMutated'));
+"""

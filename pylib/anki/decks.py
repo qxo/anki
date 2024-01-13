@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Iterable, NewType, Sequence, no_type_check
+from typing import TYPE_CHECKING, Any, Iterable, NewType, Sequence
 
 if TYPE_CHECKING:
     import anki
 
-from anki import deckconfig_pb2, decks_pb2
+import anki.cards
+import anki.collection
+from anki import deck_config_pb2, decks_pb2
 from anki._legacy import DeprecatedNamesMixin, deprecated, print_deprecation_warning
-from anki.cards import CardId
 from anki.collection import OpChanges, OpChangesWithCount, OpChangesWithId
 from anki.consts import *
 from anki.errors import NotFoundError
@@ -22,8 +23,9 @@ DeckTreeNode = decks_pb2.DeckTreeNode
 DeckNameId = decks_pb2.DeckNameId
 FilteredDeckConfig = decks_pb2.Deck.Filtered
 DeckCollapseScope = decks_pb2.SetDeckCollapsedRequest.Scope
-DeckConfigsForUpdate = deckconfig_pb2.DeckConfigsForUpdate
-UpdateDeckConfigs = deckconfig_pb2.UpdateDeckConfigsRequest
+DeckConfigsForUpdate = deck_config_pb2.DeckConfigsForUpdate
+UpdateDeckConfigs = deck_config_pb2.UpdateDeckConfigsRequest
+Deck = decks_pb2.Deck
 
 # type aliases until we can move away from dicts
 DeckDict = dict[str, Any]
@@ -103,9 +105,9 @@ class DeckManager(DeprecatedNamesMixin):
         if id := self.col.decks.id_for_name(name):
             return OpChangesWithId(id=id)
         else:
-            deck = self.col.decks.new_deck_legacy(filtered=False)
-            deck["name"] = name
-            return self.add_deck_legacy(deck)
+            deck = self.col.decks.new_deck()
+            deck.name = name
+            return self.add_deck(deck)
 
     def add_deck_legacy(self, deck: DeckDict) -> OpChangesWithId:
         "Add a deck created with new_deck_legacy(). Must have id of 0."
@@ -160,6 +162,13 @@ class DeckManager(DeprecatedNamesMixin):
     def get_all_legacy(self) -> list[DeckDict]:
         return list(from_json_bytes(self.col._backend.get_all_decks_legacy()).values())
 
+    def new_deck(self) -> Deck:
+        "Return a new normal deck. It must be added with .add_deck() after a name assigned."
+        return self.col._backend.new_deck()
+
+    def add_deck(self, deck: Deck) -> OpChangesWithId:
+        return self.col._backend.add_deck(message=deck)
+
     def new_deck_legacy(self, filtered: bool) -> DeckDict:
         deck = from_json_bytes(self.col._backend.new_deck_legacy(filtered))
         if deck["dyn"]:
@@ -173,7 +182,7 @@ class DeckManager(DeprecatedNamesMixin):
         return deck
 
     def deck_tree(self) -> DeckTreeNode:
-        return self.col._backend.deck_tree(top_deck_id=0, now=0)
+        return self.col._backend.deck_tree(now=0)
 
     @classmethod
     def find_deck_in_tree(
@@ -285,7 +294,8 @@ class DeckManager(DeprecatedNamesMixin):
         return self.col._backend.get_deck_configs_for_update(deck_id)
 
     def update_deck_configs(self, input: UpdateDeckConfigs) -> OpChanges:
-        return self.col._backend.update_deck_configs(input=input)
+        op_bytes = self.col._backend.update_deck_configs_raw(input.SerializeToString())
+        return OpChanges.FromString(op_bytes)
 
     def all_config(self) -> list[DeckConfigDict]:
         "A list of all deck config."
@@ -382,7 +392,7 @@ class DeckManager(DeprecatedNamesMixin):
             return deck["name"]
         return None
 
-    def cids(self, did: DeckId, children: bool = False) -> list[CardId]:
+    def cids(self, did: DeckId, children: bool = False) -> list[anki.cards.CardId]:
         if not children:
             return self.col.db.list("select id from cards where did=?", did)
         dids = [did]
@@ -390,7 +400,7 @@ class DeckManager(DeprecatedNamesMixin):
             dids.append(id)
         return self.col.db.list(f"select id from cards where did in {ids2str(dids)}")
 
-    def for_card_ids(self, cids: list[CardId]) -> list[DeckId]:
+    def for_card_ids(self, cids: list[anki.cards.CardId]) -> list[DeckId]:
         return self.col.db.list(f"select did from cards where id in {ids2str(cids)}")
 
     # Deck selection
@@ -414,7 +424,6 @@ class DeckManager(DeprecatedNamesMixin):
         # make sure arg is an int; legacy callers may be passing in a string
         did = DeckId(did)
         self.set_current(did)
-        self.col.reset()
 
     selected = get_current_id
 
@@ -542,7 +551,7 @@ class DeckManager(DeprecatedNamesMixin):
         return {d["name"]: d for d in self.all()}
 
     @deprecated(info="use col.set_deck() instead")
-    def set_deck(self, cids: list[CardId], did: DeckId) -> None:
+    def set_deck(self, cids: list[anki.cards.CardId], did: DeckId) -> None:
         self.col.set_deck(card_ids=cids, deck_id=did)
         self.col.db.execute(
             f"update cards set did=?,usn=?,mod=? where id in {ids2str(cids)}",
@@ -580,15 +589,18 @@ DeckManager.register_deprecated_aliases(
 )
 
 
-@no_type_check
-def __getattr__(name):
-    if name == "defaultDeck":
-        print_deprecation_warning(
-            "defaultDeck is deprecated; call decks.id() without it"
-        )
-        return 0
-    elif name == "defaultDynamicDeck":
-        print_deprecation_warning("defaultDynamicDeck is replaced with new_filtered()")
-        return 1
-    else:
-        raise AttributeError(f"module {__name__} has no attribute {name}")
+if not TYPE_CHECKING:
+
+    def __getattr__(name):
+        if name == "defaultDeck":
+            print_deprecation_warning(
+                "defaultDeck is deprecated; call decks.id() without it"
+            )
+            return 0
+        elif name == "defaultDynamicDeck":
+            print_deprecation_warning(
+                "defaultDynamicDeck is replaced with new_filtered()"
+            )
+            return 1
+        else:
+            raise AttributeError(f"module {__name__} has no attribute {name}")

@@ -93,12 +93,29 @@ statistics-range-deck = deck
 statistics-range-collection = collection
 statistics-range-search = Search
 statistics-card-ease-title = Card Ease
+statistics-card-difficulty-title = Card Difficulty
+statistics-card-stability-title = Card Stability
+statistics-card-stability-subtitle = The delay at which retrievability falls to 90%.
+statistics-average-stability = Average stability
+statistics-card-retrievability-title = Card Retrievability
 statistics-card-ease-subtitle = The lower the ease, the more frequently a card will appear.
+statistics-card-difficulty-subtitle2 = The higher the difficulty, the slower stability will increase.
+statistics-retrievability-subtitle = The probability of recalling a card today.
 # eg "3 cards with 150-170% ease"
 statistics-card-ease-tooltip =
     { $cards ->
         [one] { $cards } card with { $percent } ease
        *[other] { $cards } cards with { $percent } ease
+    }
+statistics-card-difficulty-tooltip =
+    { $cards ->
+        [one] { $cards } card with { $percent } difficulty
+       *[other] { $cards } cards with { $percent } difficulty
+    }
+statistics-retrievability-tooltip =
+    { $cards ->
+        [one] { $cards } card with { $percent } retrievability
+       *[other] { $cards } cards with { $percent } retrievability
     }
 statistics-future-due-title = Future Due
 statistics-future-due-subtitle = The number of reviews due in the future.
@@ -146,9 +163,23 @@ statistics-intervals-day-single =
         [one] { $cards } card with a { $day } day interval
        *[other] { $cards } cards with a { $day } day interval
     }
+statistics-stability-day-range =
+    { $cards ->
+        [one] { $cards } card with a { $daysStart }~{ $daysEnd } day stability
+       *[other] { $cards } cards with a { $daysStart }~{ $daysEnd } day stability
+    }
+statistics-stability-day-single =
+    { $cards ->
+        [one] { $cards } card with a { $day } day stability
+       *[other] { $cards } cards with a { $day } day stability
+    }
 # hour range, eg "From 14:00-15:00"
 statistics-hours-range = From { $hourStart }:00~{ $hourEnd }:00
 statistics-hours-correct = { $correct }/{ $total } correct ({ $percent }%)
+# the emoji depicts the graph displaying this number
+statistics-hours-reviews = 📊 { $reviews } reviews
+# the emoji depicts the graph displaying this number
+statistics-hours-correct-reviews = 📈 { $percent }% correct ({ $reviews })
 statistics-hours-title = Hourly Breakdown
 statistics-hours-subtitle = Review success rate for each hour of the day.
 # shown when graph is empty
@@ -196,6 +227,9 @@ statistics-cards-per-day =
        *[other] { $count } cards/day
     }
 statistics-average-ease = Average ease
+statistics-average-difficulty = Average difficulty
+statistics-average-retrievability = Average retrievability
 statistics-save-pdf = Save PDF
 statistics-saved = Saved.
 statistics-stats = stats
+statistics-title = Statistics

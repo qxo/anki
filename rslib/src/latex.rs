@@ -4,19 +4,22 @@
 use std::borrow::Cow;
 
 use lazy_static::lazy_static;
-use regex::{Captures, Regex};
+use regex::Captures;
+use regex::Regex;
 
-use crate::{cloze::expand_clozes_to_reveal_latex, media::files::sha1_of_data, text::strip_html};
+use crate::cloze::expand_clozes_to_reveal_latex;
+use crate::media::files::sha1_of_data;
+use crate::text::strip_html;
 
 lazy_static! {
-    static ref LATEX: Regex = Regex::new(
-        r#"(?xsi)
+    pub(crate) static ref LATEX: Regex = Regex::new(
+        r"(?xsi)
             \[latex\](.+?)\[/latex\]     # 1 - standard latex
             |
             \[\$\](.+?)\[/\$\]           # 2 - inline math
             |
             \[\$\$\](.+?)\[/\$\$\]       # 3 - math environment
-            "#
+            "
     )
     .unwrap();
     static ref LATEX_NEWLINES: Regex = Regex::new(
@@ -33,7 +36,7 @@ pub(crate) fn contains_latex(text: &str) -> bool {
     LATEX.is_match(text)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ExtractedLatex {
     pub fname: String,
     pub latex: String,
@@ -43,18 +46,19 @@ pub struct ExtractedLatex {
 pub(crate) fn extract_latex_expanding_clozes(
     text: &str,
     svg: bool,
-) -> (String, Vec<ExtractedLatex>) {
-    let text: Cow<str> = if text.contains("{{c") {
-        expand_clozes_to_reveal_latex(text).into()
+) -> (Cow<str>, Vec<ExtractedLatex>) {
+    if text.contains("{{c") {
+        let expanded = expand_clozes_to_reveal_latex(text);
+        let (text, extracts) = extract_latex(&expanded, svg);
+        (text.into_owned().into(), extracts)
     } else {
-        text.into()
-    };
-    extract_latex(&text, svg)
+        extract_latex(text, svg)
+    }
 }
 
 /// Extract LaTeX from the provided text.
 /// Expects cloze deletions to already be expanded.
-pub(crate) fn extract_latex(text: &str, svg: bool) -> (String, Vec<ExtractedLatex>) {
+pub fn extract_latex(text: &str, svg: bool) -> (Cow<str>, Vec<ExtractedLatex>) {
     let mut extracted = vec![];
 
     let new_text = LATEX.replace_all(text, |caps: &Captures| {
@@ -75,7 +79,7 @@ pub(crate) fn extract_latex(text: &str, svg: bool) -> (String, Vec<ExtractedLate
         img_link
     });
 
-    (new_text.into(), extracted)
+    (new_text, extracted)
 }
 
 fn strip_html_for_latex(html: &str) -> Cow<str> {
@@ -107,7 +111,8 @@ fn image_link_for_fname(src: &str, fname: &str) -> String {
 
 #[cfg(test)]
 mod test {
-    use crate::latex::{extract_latex, ExtractedLatex};
+    use crate::latex::extract_latex;
+    use crate::latex::ExtractedLatex;
 
     #[test]
     fn latex() {
@@ -118,7 +123,8 @@ mod test {
                 format!(
                     "a<img class=latex alt=\"one&#x0A;and&#x0A;two\" src=\"{}\">b",
                     fname
-                ),
+                )
+                .into(),
                 vec![ExtractedLatex {
                     fname: fname.into(),
                     latex: "one\nand\ntwo".into()

@@ -1,11 +1,14 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 from typing import Optional
 
 import aqt
+import aqt.forms
+import aqt.operations
 from anki.collection import OpChanges
-from anki.consts import *
 from anki.lang import without_unicode_isolation
 from anki.models import NotetypeDict
 from aqt import AnkiQt, gui_hooks
@@ -18,7 +21,7 @@ from aqt.utils import (
     disable_help_button,
     getOnlyText,
     openHelp,
-    showWarning,
+    show_warning,
     tooltip,
     tr,
 )
@@ -33,17 +36,22 @@ class FieldDialog(QDialog):
         open_at: int = 0,
     ) -> None:
         QDialog.__init__(self, parent or mw)
+        mw.garbage_collect_on_dialog_finish(self)
         self.mw = mw
         self.col = self.mw.col
         self.mm = self.mw.col.models
         self.model = nt
         self.mm._remove_from_cache(self.model["id"])
         self.change_tracker = ChangeTracker(self.mw)
-        self.form = aqt.forms.fields.Ui_Dialog()
-        self.form.setupUi(self)
+
         self.setWindowTitle(
             without_unicode_isolation(tr.fields_fields_for(val=self.model["name"]))
         )
+
+        self.form = aqt.forms.fields.Ui_Dialog()
+        self.form.setupUi(self)
+        self.webview = None
+
         disable_help_button(self)
         self.form.buttonBox.button(QDialogButtonBox.StandardButton.Help).setAutoDefault(
             False
@@ -61,6 +69,9 @@ class FieldDialog(QDialog):
         self.form.fieldList.dropEvent = self.onDrop  # type: ignore[assignment]
         self.form.fieldList.setCurrentRow(open_at)
         self.exec()
+
+    def _on_bridge_cmd(self, cmd: str) -> bool:
+        return False
 
     ##########################################################################
 
@@ -117,17 +128,17 @@ class FieldDialog(QDialog):
         if not txt:
             return None
         if txt[0] in "#^/":
-            showWarning(tr.fields_name_first_letter_not_valid())
+            show_warning(tr.fields_name_first_letter_not_valid())
             return None
         for letter in """:{"}""":
             if letter in txt:
-                showWarning(tr.fields_name_invalid_letter())
+                show_warning(tr.fields_name_invalid_letter())
                 return None
         for f in self.model["flds"]:
             if ignoreOrd is not None and f["ord"] == ignoreOrd:
                 continue
             if f["name"] == txt:
-                showWarning(tr.fields_that_field_name_is_already_used())
+                show_warning(tr.fields_that_field_name_is_already_used())
                 return None
         return txt
 
@@ -156,12 +167,18 @@ class FieldDialog(QDialog):
         self.saveField()
         f = self.mm.new_field(name)
         self.mm.add_field(self.model, f)
+        gui_hooks.fields_did_add_field(self, f)
+
         self.fillFields()
         self.form.fieldList.setCurrentRow(len(self.model["flds"]) - 1)
 
     def onDelete(self) -> None:
         if len(self.model["flds"]) < 2:
-            showWarning(tr.fields_notes_require_at_least_one_field())
+            show_warning(tr.fields_notes_require_at_least_one_field())
+            return
+        field = self.model["flds"][self.form.fieldList.currentRow()]
+        if field["preventDeletion"]:
+            show_warning(tr.fields_field_is_required())
             return
         count = self.mm.use_count(self.model)
         c = tr.browsing_note_count(count=count)
@@ -169,9 +186,8 @@ class FieldDialog(QDialog):
             return
         if not self.change_tracker.mark_schema():
             return
-        f = self.model["flds"][self.form.fieldList.currentRow()]
-        self.mm.remove_field(self.model, f)
-        gui_hooks.fields_did_delete_field(self, f)
+        self.mm.remove_field(self.model, field)
+        gui_hooks.fields_did_delete_field(self, field)
 
         self.fillFields()
         self.form.fieldList.setCurrentRow(0)
@@ -214,6 +230,9 @@ class FieldDialog(QDialog):
         f.fontSize.setValue(fld["size"])
         f.sortField.setChecked(self.model["sortf"] == fld["ord"])
         f.rtl.setChecked(fld["rtl"])
+        f.plainTextByDefault.setChecked(fld["plainText"])
+        f.collapseByDefault.setChecked(fld["collapsed"])
+        f.excludeFromSearch.setChecked(fld["excludeFromSearch"])
         f.fieldDescription.setText(fld.get("description", ""))
 
     def saveField(self) -> None:
@@ -235,12 +254,28 @@ class FieldDialog(QDialog):
         if fld["rtl"] != rtl:
             fld["rtl"] = rtl
             self.change_tracker.mark_basic()
+        plain_text = f.plainTextByDefault.isChecked()
+        if fld["plainText"] != plain_text:
+            fld["plainText"] = plain_text
+            self.change_tracker.mark_basic()
+        collapsed = f.collapseByDefault.isChecked()
+        if fld["collapsed"] != collapsed:
+            fld["collapsed"] = collapsed
+            self.change_tracker.mark_basic()
+        exclude_from_search = f.excludeFromSearch.isChecked()
+        if fld["excludeFromSearch"] != exclude_from_search:
+            fld["excludeFromSearch"] = exclude_from_search
+            self.change_tracker.mark_basic()
         desc = f.fieldDescription.text()
         if fld.get("description", "") != desc:
             fld["description"] = desc
             self.change_tracker.mark_basic()
 
     def reject(self) -> None:
+        if self.webview:
+            self.webview.cleanup()
+            self.webview = None
+
         if self.change_tracker.changed():
             if not askUser("Discard changes?"):
                 return
@@ -254,9 +289,9 @@ class FieldDialog(QDialog):
             tooltip(tr.card_templates_changes_saved(), parent=self.parentWidget())
             QDialog.accept(self)
 
-        update_notetype_legacy(parent=self.mw, notetype=self.model).success(
-            on_done
-        ).run_in_background()
+        update_notetype_legacy(
+            parent=self.mw, notetype=self.model, skip_checks=True
+        ).success(on_done).run_in_background()
 
     def onHelp(self) -> None:
         openHelp(HelpPage.CUSTOMIZING_FIELDS)

@@ -3,42 +3,41 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr2 from "../lib/ftl";
-    import { Stats } from "../lib/proto";
-    import { Timestamp, timeSpan } from "../lib/time";
+    import type { CardStatsResponse_StatsRevlogEntry as RevlogEntry } from "@tslib/anki/stats_pb";
+    import { RevlogEntry_ReviewKind as ReviewKind } from "@tslib/anki/stats_pb";
+    import * as tr2 from "@tslib/ftl";
+    import { timeSpan, Timestamp } from "@tslib/time";
 
-    type StatsRevlogEntry = Stats.CardStatsResponse.StatsRevlogEntry;
+    export let revlog: RevlogEntry[];
 
-    export let revlog: StatsRevlogEntry[];
-
-    function reviewKindClass(entry: StatsRevlogEntry): string {
+    function reviewKindClass(entry: RevlogEntry): string {
         switch (entry.reviewKind) {
-            case Stats.RevlogEntry.ReviewKind.LEARNING:
+            case ReviewKind.LEARNING:
                 return "revlog-learn";
-            case Stats.RevlogEntry.ReviewKind.REVIEW:
+            case ReviewKind.REVIEW:
                 return "revlog-review";
-            case Stats.RevlogEntry.ReviewKind.RELEARNING:
+            case ReviewKind.RELEARNING:
                 return "revlog-relearn";
         }
         return "";
     }
 
-    function reviewKindLabel(entry: StatsRevlogEntry): string {
+    function reviewKindLabel(entry: RevlogEntry): string {
         switch (entry.reviewKind) {
-            case Stats.RevlogEntry.ReviewKind.LEARNING:
+            case ReviewKind.LEARNING:
                 return tr2.cardStatsReviewLogTypeLearn();
-            case Stats.RevlogEntry.ReviewKind.REVIEW:
+            case ReviewKind.REVIEW:
                 return tr2.cardStatsReviewLogTypeReview();
-            case Stats.RevlogEntry.ReviewKind.RELEARNING:
+            case ReviewKind.RELEARNING:
                 return tr2.cardStatsReviewLogTypeRelearn();
-            case Stats.RevlogEntry.ReviewKind.FILTERED:
+            case ReviewKind.FILTERED:
                 return tr2.cardStatsReviewLogTypeFiltered();
-            case Stats.RevlogEntry.ReviewKind.MANUAL:
+            case ReviewKind.MANUAL:
                 return tr2.cardStatsReviewLogTypeManual();
         }
     }
 
-    function ratingClass(entry: StatsRevlogEntry): string {
+    function ratingClass(entry: RevlogEntry): string {
         if (entry.buttonChosen === 1) {
             return "revlog-ease1";
         }
@@ -57,8 +56,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         takenSecs: string;
     }
 
-    function revlogRowFromEntry(entry: StatsRevlogEntry): RevlogRow {
-        const timestamp = new Timestamp(entry.time);
+    function revlogRowFromEntry(entry: RevlogEntry): RevlogRow {
+        const timestamp = new Timestamp(Number(entry.time));
 
         return {
             date: timestamp.dateString(),
@@ -68,12 +67,27 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             rating: entry.buttonChosen,
             ratingClass: ratingClass(entry),
             interval: timeSpan(entry.interval),
-            ease: entry.ease ? `${entry.ease / 10}%` : "",
+            ease: formatEaseOrDifficulty(entry.ease),
             takenSecs: timeSpan(entry.takenSecs, true),
         };
     }
 
     $: revlogRows = revlog.map(revlogRowFromEntry);
+
+    function formatEaseOrDifficulty(ease: number): string {
+        if (ease === 0) {
+            return "";
+        }
+        const asPct = ease / 10.0;
+        if (asPct <= 110) {
+            // FSRS
+            const unshifted = asPct - 10;
+            return `D:${unshifted.toFixed(0)}%`;
+        } else {
+            // SM-2
+            return `${asPct.toFixed(0)}%`;
+        }
+    }
 </script>
 
 {#if revlog.length > 0}
@@ -177,16 +191,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     .revlog-learn {
-        color: var(--new-count);
+        color: var(--state-new);
     }
 
     .revlog-review {
-        color: var(--review-count);
+        color: var(--state-review);
     }
 
     .revlog-relearn,
     .revlog-ease1 {
-        color: var(--learn-count);
+        color: var(--state-learn);
     }
 
     @media only screen and (max-device-width: 480px) and (orientation: portrait) {

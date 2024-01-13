@@ -3,15 +3,18 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { onMount, onDestroy, getContext } from "svelte";
+    import Modal from "bootstrap/js/dist/modal";
+    import { getContext, onDestroy, onMount } from "svelte";
+    import { registerModalClosingHandler } from "sveltelib/modal-closing";
+
     import { modalsKey } from "../components/context-keys";
     import { pageTheme } from "../sveltelib/theme";
-    import Modal from "bootstrap/js/dist/modal";
 
     export let title: string;
     export let prompt: string;
-    export let value = "";
+    export let initialValue = "";
     export let onOk: (text: string) => void;
+    $: value = initialValue;
 
     export const modalKey: string = Math.random().toString(36).substring(2);
 
@@ -25,21 +28,37 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     function onOkClicked(): void {
         onOk(inputRef.value);
         modal.hide();
-        value = "";
+        value = initialValue;
+    }
+
+    function onCancelClicked(): void {
+        modal.hide();
+        value = initialValue;
     }
 
     function onShown(): void {
         inputRef.focus();
+        setModalOpen(true);
     }
+
+    function onHidden() {
+        setModalOpen(false);
+    }
+
+    const { set: setModalOpen, remove: removeModalClosingHandler } =
+        registerModalClosingHandler(onCancelClicked);
 
     onMount(() => {
         modalRef.addEventListener("shown.bs.modal", onShown);
-        modal = new Modal(modalRef);
+        modalRef.addEventListener("hidden.bs.modal", onHidden);
+        modal = new Modal(modalRef, { keyboard: false });
         modals.set(modalKey, modal);
     });
 
     onDestroy(() => {
+        removeModalClosingHandler();
         modalRef.removeEventListener("shown.bs.modal", onShown);
+        modalRef.removeEventListener("hidden.bs.modal", onHidden);
     });
 </script>
 
@@ -65,9 +84,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             <div class="modal-body">
                 <form on:submit|preventDefault={onOkClicked}>
                     <div class="mb-3">
-                        <label for="prompt-input" class="col-form-label"
-                            >{prompt}:</label
-                        >
+                        <label for="prompt-input" class="col-form-label">
+                            {prompt}:
+                        </label>
                         <input
                             id="prompt-input"
                             bind:this={inputRef}
@@ -80,12 +99,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 </form>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"
-                    >Cancel</button
+                <button
+                    type="button"
+                    class="btn btn-secondary"
+                    on:click={onCancelClicked}
                 >
-                <button type="button" class="btn btn-primary" on:click={onOkClicked}
-                    >OK</button
-                >
+                    Cancel
+                </button>
+                <button type="button" class="btn btn-primary" on:click={onOkClicked}>
+                    OK
+                </button>
             </div>
         </div>
     </div>
@@ -99,8 +122,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     .default-colors {
-        background-color: var(--window-bg);
-        color: var(--text-fg);
+        background-color: var(--canvas);
+        color: var(--fg);
     }
 
     .invert {

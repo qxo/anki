@@ -9,6 +9,8 @@ import json
 import os
 import re
 import shutil
+import threading
+import time
 import unicodedata
 import zipfile
 from io import BufferedWriter
@@ -99,7 +101,6 @@ class Exporter:
 
 
 class TextCardExporter(Exporter):
-
     ext = ".txt"
     includeHTML = True
 
@@ -132,7 +133,6 @@ class TextCardExporter(Exporter):
 
 
 class TextNoteExporter(Exporter):
-
     ext = ".txt"
     includeTags = True
     includeHTML = True
@@ -177,7 +177,6 @@ where cards.id in %s)"""
 
 
 class AnkiExporter(Exporter):
-
     ext = ".anki2"
     includeSched: bool | None = False
     includeMedia = True
@@ -198,9 +197,6 @@ class AnkiExporter(Exporter):
             return []
 
     def exportInto(self, path: str) -> None:
-        # sched info+v2 scheduler not compatible w/ older clients
-        self._v2sched = self.col.sched_ver() != 1 and self.includeSched
-
         # create a new collection at the target
         try:
             os.unlink(path)
@@ -268,6 +264,8 @@ class AnkiExporter(Exporter):
                 # scheduling not included, so reset deck settings to default
                 d = dict(d)
                 d["conf"] = 1
+                d["reviewLimit"] = d["newLimit"] = None
+                d["reviewLimitToday"] = d["newLimitToday"] = None
             self.dst.decks.update(d)
         # copy used deck confs
         for dc in self.src.decks.all_config():
@@ -309,7 +307,7 @@ class AnkiExporter(Exporter):
         # such as update the deck description
         pass
 
-    def removeSystemTags(self, tags: str) -> Any:
+    def removeSystemTags(self, tags: str) -> str:
         return self.src.tags.rem_from_str("marked leech", tags)
 
     def _modelHasMedia(self, model, fname) -> bool:
@@ -328,7 +326,6 @@ class AnkiExporter(Exporter):
 
 
 class AnkiPackageExporter(AnkiExporter):
-
     ext = ".apkg"
 
     def __init__(self, col: Collection) -> None:
@@ -340,7 +337,9 @@ class AnkiPackageExporter(AnkiExporter):
 
     def exportInto(self, path: str) -> None:
         # open a zip file
-        z = zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
+        z = zipfile.ZipFile(
+            path, "w", zipfile.ZIP_DEFLATED, allowZip64=True, strict_timestamps=False
+        )
         media = self.doExport(z, path)
         # media map
         z.writestr("media", json.dumps(media))
@@ -350,13 +349,10 @@ class AnkiPackageExporter(AnkiExporter):
         # export into the anki2 file
         colfile = path.replace(".apkg", ".anki2")
         AnkiExporter.exportInto(self, colfile)
-        if not self._v2sched:
-            z.write(colfile, "collection.anki2")
-        else:
-            # prevent older clients from accessing
-            # pylint: disable=unreachable
-            self._addDummyCollection(z)
-            z.write(colfile, "collection.anki21")
+        # prevent older clients from accessing
+        # pylint: disable=unreachable
+        self._addDummyCollection(z)
+        z.write(colfile, "collection.anki21")
 
         # and media
         self.prepareMedia()
@@ -366,7 +362,6 @@ class AnkiPackageExporter(AnkiExporter):
         p = path.replace(".apkg", ".media.db2")
         if os.path.exists(p):
             os.unlink(p)
-        os.chdir(self.mediaDir)
         shutil.rmtree(path.replace(".apkg", ".media"))
         return media
 
@@ -401,7 +396,6 @@ class AnkiPackageExporter(AnkiExporter):
         n = c.newNote()
         n.fields[0] = "This file requires a newer version of Anki."
         c.addNote(n)
-        c.save()
         c.close(downgrade=True)
 
         zip.write(path, "collection.anki2")
@@ -413,10 +407,10 @@ class AnkiPackageExporter(AnkiExporter):
 
 
 class AnkiCollectionPackageExporter(AnkiPackageExporter):
-
     ext = ".colpkg"
     verbatim = True
     includeSched = None
+    LEGACY = True
 
     def __init__(self, col):
         AnkiPackageExporter.__init__(self, col)
@@ -425,22 +419,32 @@ class AnkiCollectionPackageExporter(AnkiPackageExporter):
     def key(col: Collection) -> str:
         return col.tr.exporting_anki_collection_package()
 
-    def doExport(self, z, path):
-        "Export collection. Caller must re-open afterwards."
-        # close our deck & write it into the zip file
-        self.count = self.col.card_count()
-        v2 = self.col.sched_ver() != 1
-        mdir = self.col.media.dir()
-        self.col.close(downgrade=True)
-        if not v2:
-            z.write(self.col.path, "collection.anki2")
-        else:
-            self._addDummyCollection(z)
-            z.write(self.col.path, "collection.anki21")
-        # copy all media
-        if not self.includeMedia:
-            return {}
-        return self._exportMedia(z, os.listdir(mdir), mdir)
+    def exportInto(self, path: str) -> None:
+        """Export collection. Caller must re-open afterwards."""
+
+        def exporting_media() -> bool:
+            return any(
+                hook.__name__ == "exported_media"
+                for hook in hooks.legacy_export_progress._hooks
+            )
+
+        def progress() -> None:
+            while exporting_media():
+                progress = self.col._backend.latest_progress()
+                if progress.HasField("exporting"):
+                    hooks.legacy_export_progress(progress.exporting)
+                time.sleep(0.1)
+
+        threading.Thread(target=progress).start()
+        self.col.export_collection_package(path, self.includeMedia, self.LEGACY)
+
+
+class AnkiCollectionPackage21bExporter(AnkiCollectionPackageExporter):
+    LEGACY = False
+
+    @staticmethod
+    def key(_col: Collection) -> str:
+        return "Anki 2.1.50+ Collection Package"
 
 
 # Export modules
@@ -448,7 +452,7 @@ class AnkiCollectionPackageExporter(AnkiPackageExporter):
 
 
 def exporters(col: Collection) -> list[tuple[str, Any]]:
-    def id(obj):
+    def id(obj) -> tuple[str, Exporter]:
         if callable(obj.key):
             key_str = obj.key(col)
         else:
@@ -457,6 +461,7 @@ def exporters(col: Collection) -> list[tuple[str, Any]]:
 
     exps = [
         id(AnkiCollectionPackageExporter),
+        id(AnkiCollectionPackage21bExporter),
         id(AnkiPackageExporter),
         id(TextNoteExporter),
         id(TextCardExporter),

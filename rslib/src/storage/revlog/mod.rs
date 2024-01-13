@@ -3,19 +3,18 @@
 
 use std::convert::TryFrom;
 
-use rusqlite::{
-    params,
-    types::{FromSql, FromSqlError, ValueRef},
-    Row,
-};
+use rusqlite::params;
+use rusqlite::types::FromSql;
+use rusqlite::types::FromSqlError;
+use rusqlite::types::ValueRef;
+use rusqlite::OptionalExtension;
+use rusqlite::Row;
 
 use super::SqliteStorage;
-use crate::{
-    backend_proto as pb,
-    error::Result,
-    prelude::*,
-    revlog::{RevlogEntry, RevlogReviewKind},
-};
+use crate::error::Result;
+use crate::prelude::*;
+use crate::revlog::RevlogEntry;
+use crate::revlog::RevlogReviewKind;
 
 pub(crate) struct StudiedToday {
     pub cards: u32,
@@ -61,16 +60,19 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Returns the used id, which may differ if `ensure_unique` is true.
+    /// Adds the entry, if its id is unique. If it is not, and `uniquify` is
+    /// true, adds it with a new id. Returns the added id.
+    /// (I.e., the option is safe to unwrap, if `uniquify` is true.)
     pub(crate) fn add_revlog_entry(
         &self,
         entry: &RevlogEntry,
-        ensure_unique: bool,
-    ) -> Result<RevlogId> {
-        self.db
+        uniquify: bool,
+    ) -> Result<Option<RevlogId>> {
+        let added = self
+            .db
             .prepare_cached(include_str!("add.sql"))?
             .execute(params![
-                ensure_unique,
+                uniquify,
                 entry.id,
                 entry.cid,
                 entry.usn,
@@ -81,7 +83,7 @@ impl SqliteStorage {
                 entry.taken_millis,
                 entry.review_kind as u8
             ])?;
-        Ok(RevlogId(self.db.last_insert_rowid()))
+        Ok((added > 0).then(|| RevlogId(self.db.last_insert_rowid())))
     }
 
     pub(crate) fn get_revlog_entry(&self, id: RevlogId) -> Result<Option<RevlogEntry>> {
@@ -92,7 +94,17 @@ impl SqliteStorage {
             .transpose()
     }
 
-    /// Only intended to be used by the undo code, as Anki can not sync revlog deletions.
+    /// Determine the the last review time based on the revlog.
+    pub(crate) fn time_of_last_review(&self, card_id: CardId) -> Result<Option<TimestampSecs>> {
+        self.db
+            .prepare_cached(include_str!("time_of_last_review.sql"))?
+            .query_row([card_id], |row| row.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Only intended to be used by the undo code, as Anki can not sync revlog
+    /// deletions.
     pub(crate) fn remove_revlog_entry(&self, id: RevlogId) -> Result<()> {
         self.db
             .prepare_cached("delete from revlog where id = ?")?
@@ -107,24 +119,49 @@ impl SqliteStorage {
             .collect()
     }
 
-    pub(crate) fn get_revlog_entries_for_searched_cards(
+    pub(crate) fn get_revlog_entries_for_searched_cards_after_stamp(
         &self,
         after: TimestampSecs,
-    ) -> Result<Vec<pb::RevlogEntry>> {
+    ) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(
                 include_str!("get.sql"),
                 " where cid in (select cid from search_cids) and id >= ?"
             ))?
-            .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?
+            .query_and_then([after.0 * 1000], row_to_revlog_entry)?
             .collect()
     }
 
-    /// This includes entries from deleted cards.
-    pub(crate) fn get_all_revlog_entries(
+    pub(crate) fn get_revlog_entries_for_searched_cards(&self) -> Result<Vec<RevlogEntry>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get.sql"),
+                " where cid in (select cid from search_cids)"
+            ))?
+            .query_and_then([], row_to_revlog_entry)?
+            .collect()
+    }
+
+    pub(crate) fn get_revlog_entries_for_searched_cards_in_card_order(
         &self,
-        after: TimestampSecs,
-    ) -> Result<Vec<pb::RevlogEntry>> {
+    ) -> Result<Vec<RevlogEntry>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get.sql"),
+                " where cid in (select cid from search_cids) order by cid, id"
+            ))?
+            .query_and_then([], row_to_revlog_entry)?
+            .collect()
+    }
+
+    pub(crate) fn get_all_revlog_entries_in_card_order(&self) -> Result<Vec<RevlogEntry>> {
+        self.db
+            .prepare_cached(concat!(include_str!("get.sql"), " order by cid, id"))?
+            .query_and_then([], row_to_revlog_entry)?
+            .collect()
+    }
+
+    pub(crate) fn get_all_revlog_entries(&self, after: TimestampSecs) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id >= ?"))?
             .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?

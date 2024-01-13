@@ -1,38 +1,38 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { Stats } from "../lib/proto";
+import type { GraphsResponse } from "@tslib/anki/stats_pb";
+import { GraphPreferences_Weekday as Weekday } from "@tslib/anki/stats_pb";
+import * as tr from "@tslib/ftl";
+import { localizedDate, weekdayLabel } from "@tslib/i18n";
+import type { CountableTimeInterval } from "d3";
+import { timeHour } from "d3";
 import {
     interpolateBlues,
-    select,
     pointer,
     scaleLinear,
     scaleSequentialSqrt,
+    select,
     timeDay,
-    timeYear,
-    timeSunday,
-    timeMonday,
     timeFriday,
+    timeMonday,
     timeSaturday,
+    timeSunday,
+    timeYear,
 } from "d3";
-import type { CountableTimeInterval } from "d3";
 
-import { showTooltip, hideTooltip } from "./tooltip";
-import {
-    GraphBounds,
-    setDataAvailable,
-    RevlogRange,
-    SearchDispatch,
-} from "./graph-helpers";
+import { firstLanguage } from "../lib/i18n/bundles";
+import type { GraphBounds, SearchDispatch } from "./graph-helpers";
+import { RevlogRange, setDataAvailable } from "./graph-helpers";
 import { clickableClass } from "./graph-styles";
-import { weekdayLabel, localizedDate } from "../lib/i18n";
-import * as tr from "../lib/ftl";
+import { hideTooltip, showTooltip } from "./tooltip";
 
 export interface GraphData {
     // indexed by day, where day is relative to today
     reviewCount: Map<number, number>;
     timeFunction: CountableTimeInterval;
     weekdayLabels: number[];
+    rolloverHour: number;
 }
 
 interface DayDatum {
@@ -45,33 +45,22 @@ interface DayDatum {
     date: Date;
 }
 
-type WeekdayType = Stats.GraphPreferences.Weekday;
-const Weekday = Stats.GraphPreferences.Weekday; /* enum */
-
 export function gatherData(
-    data: Stats.GraphsResponse,
-    firstDayOfWeek: WeekdayType,
+    data: GraphsResponse,
+    firstDayOfWeek: Weekday,
 ): GraphData {
-    const reviewCount = new Map<number, number>();
-
-    for (const review of data.revlog as Stats.RevlogEntry[]) {
-        if (review.buttonChosen == 0) {
-            continue;
-        }
-        const day = Math.ceil(
-            ((review.id as number) / 1000 - data.nextDayAtSecs) / 86400,
-        );
-        const count = reviewCount.get(day) ?? 0;
-        reviewCount.set(day, count + 1);
-    }
-
+    const reviewCount = new Map(
+        Object.entries(data.reviews!.count).map(([k, v]) => {
+            return [Number(k), v.learn + v.relearn + v.mature + v.filtered + v.young];
+        }),
+    );
     const timeFunction = timeFunctionForDay(firstDayOfWeek);
     const weekdayLabels: number[] = [];
     for (let i = 0; i < 7; i++) {
         weekdayLabels.push((firstDayOfWeek + i) % 7);
     }
 
-    return { reviewCount, timeFunction, weekdayLabels };
+    return { reviewCount, timeFunction, weekdayLabels, rolloverHour: data.rolloverHour };
 }
 
 export function renderCalendar(
@@ -97,7 +86,9 @@ export function renderCalendar(
     const dayMap: Map<number, DayDatum> = new Map();
     let maxCount = 0;
     for (const [day, count] of sourceData.reviewCount.entries()) {
-        const date = new Date(now.getTime() + day * 86400 * 1000);
+        let date = timeDay.offset(now, day);
+        // anki day does not necessarily roll over at midnight, we account for this when mapping onto calendar days
+        date = timeHour.offset(date, -1 * sourceData.rolloverHour);
         if (count > maxCount) {
             maxCount = count;
         }
@@ -117,12 +108,12 @@ export function renderCalendar(
         setDataAvailable(svg, true);
     }
 
-    // fill in any blanks
+    // fill in any blanks, including the current calendar day even if the anki day has not rolled over
     const startDate = timeYear(nowForYear);
     const oneYearAgoFromNow = new Date(now);
     oneYearAgoFromNow.setFullYear(now.getFullYear() - 1);
     for (let i = 0; i < 365; i++) {
-        const date = new Date(startDate.getTime() + i * 86400 * 1000);
+        const date = timeDay.offset(startDate, i);
         if (date > now) {
             // don't fill out future dates
             continue;
@@ -164,6 +155,8 @@ export function renderCalendar(
     const height = bounds.height / 10;
     const emptyColour = nightMode ? "#333" : "#ddd";
 
+    const firstLang = firstLanguage();
+
     svg.select("g.weekdays")
         .selectAll("text")
         .data(sourceData.weekdayLabels)
@@ -176,7 +169,7 @@ export function renderCalendar(
         .attr("fill", nightMode ? "#ddd" : "black")
         .attr("dominant-baseline", "hanging")
         .attr("text-anchor", "end")
-        .attr("font-size", "small")
+        .attr("font-size", firstLang.includes("zh") ? "xx-small" : "small")
         .attr("font-family", "monospace")
         .attr("direction", "ltr")
         .style("user-select", "none")
@@ -184,7 +177,7 @@ export function renderCalendar(
         .filter((d: number) =>
             [Weekday.SUNDAY, Weekday.MONDAY, Weekday.FRIDAY, Weekday.SATURDAY].includes(
                 d,
-            ),
+            )
         )
         .on("click", (_event: MouseEvent, d: number) => setFirstDayOfWeek(d));
 
@@ -203,7 +196,7 @@ export function renderCalendar(
         })
         .on("mouseout", hideTooltip)
         .attr("class", (d: DayDatum): string => (d.count > 0 ? clickableClass : ""))
-        .on("click", function (_event: MouseEvent, d: DayDatum) {
+        .on("click", function(_event: MouseEvent, d: DayDatum) {
             if (d.count > 0) {
                 dispatch("search", { query: `"prop:rated=${d.day}"` });
             }
@@ -213,7 +206,7 @@ export function renderCalendar(
         .attr("fill", (d: DayDatum) => (d.count === 0 ? emptyColour : blues(d.count)!));
 }
 
-function timeFunctionForDay(firstDayOfWeek: WeekdayType): CountableTimeInterval {
+function timeFunctionForDay(firstDayOfWeek: Weekday): CountableTimeInterval {
     switch (firstDayOfWeek) {
         case Weekday.MONDAY:
             return timeMonday;

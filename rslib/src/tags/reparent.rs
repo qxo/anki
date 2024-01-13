@@ -3,7 +3,10 @@
 
 use std::collections::HashMap;
 
-use super::{join_tags, matcher::TagMatcher};
+use unicase::UniCase;
+
+use super::join_tags;
+use super::matcher::TagMatcher;
 use crate::prelude::*;
 
 impl Collection {
@@ -38,7 +41,9 @@ impl Collection {
         let usn = self.usn()?;
         let mut matcher = TagMatcher::new(&join_tags(tags_to_reparent))?;
         let old_to_new_names = old_to_new_names(tags_to_reparent, new_parent);
-
+        if old_to_new_names.is_empty() {
+            return Ok(0);
+        }
         let matched_notes = self
             .storage
             .get_note_tags_by_predicate(|tags| matcher.is_match(tags))?;
@@ -59,8 +64,12 @@ impl Collection {
         // replace tags
         for mut note in matched_notes {
             let original = note.clone();
-            note.tags = matcher
-                .replace_with_fn(&note.tags, |cap| old_to_new_names.get(cap).unwrap().clone());
+            note.tags = matcher.replace_with_fn(&note.tags, |cap| {
+                old_to_new_names
+                    .get(&UniCase::new(cap.to_string()))
+                    .unwrap()
+                    .clone()
+            });
             note.set_modified(usn);
             self.update_note_tags_undoable(&note, original)?;
         }
@@ -77,13 +86,13 @@ impl Collection {
 fn old_to_new_names(
     tags_to_reparent: &[String],
     new_parent: Option<String>,
-) -> HashMap<&str, String> {
+) -> HashMap<UniCase<String>, String> {
     tags_to_reparent
         .iter()
         // generate resulting names and filter out invalid ones
         .flat_map(|source_tag| {
             reparented_name(source_tag, new_parent.as_deref())
-                .map(|output_name| (source_tag.as_str(), output_name))
+                .map(|output_name| (UniCase::new(source_tag.to_owned()), output_name))
         })
         .collect()
 }
@@ -92,8 +101,10 @@ fn old_to_new_names(
 /// Returns None if new parent is a child of the tag to be reparented.
 fn reparented_name(existing_name: &str, new_parent: Option<&str>) -> Option<String> {
     let existing_base = existing_name.rsplit("::").next().unwrap();
+    let existing_root = existing_name.split("::").next().unwrap();
     if let Some(new_parent) = new_parent {
-        if new_parent.starts_with(existing_name) {
+        let new_parent_root = new_parent.split("::").next().unwrap();
+        if new_parent.starts_with(existing_name) && new_parent_root == existing_root {
             // foo onto foo::bar, or foo onto itself -> no-op
             None
         } else {
@@ -109,7 +120,6 @@ fn reparented_name(existing_name: &str, new_parent: Option<&str>) -> Option<Stri
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::collection::open_test_collection;
 
     fn alltags(col: &Collection) -> Vec<String> {
         col.storage
@@ -122,9 +132,11 @@ mod test {
 
     #[test]
     fn dragdrop() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         for tag in &[
+            "a",
+            "ab",
             "another",
             "parent1::child1::grandchild1",
             "parent1::child1",
@@ -147,6 +159,8 @@ mod test {
         assert_eq!(
             alltags(&col),
             &[
+                "a",
+                "ab",
                 "parent1",
                 "parent1::another",
                 "parent1::child1",
@@ -164,6 +178,8 @@ mod test {
         assert_eq!(
             alltags(&col),
             &[
+                "a",
+                "ab",
                 "parent1",
                 "parent1::another",
                 "parent2",
@@ -178,11 +194,67 @@ mod test {
         assert_eq!(
             alltags(&col),
             &[
+                "a",
+                "ab",
                 "another",
                 "parent1",
                 "parent2",
                 "parent2::child1",
                 "parent2::child1::grandchild1",
+            ]
+        );
+
+        // parent1 onto parent1::child1 -> no-op
+        col.reparent_tags(
+            &["parent1".to_string()],
+            Some("parent1::child1".to_string()),
+        )?;
+
+        assert_eq!(
+            alltags(&col),
+            &[
+                "a",
+                "ab",
+                "another",
+                "parent1",
+                "parent2",
+                "parent2::child1",
+                "parent2::child1::grandchild1",
+            ]
+        );
+
+        // tags that are prefixes of the new parent are handled correctly
+        col.reparent_tags(&["a".to_string()], Some("ab".to_string()))?;
+
+        assert_eq!(
+            alltags(&col),
+            &[
+                "ab",
+                "ab::a",
+                "another",
+                "parent1",
+                "parent2",
+                "parent2::child1",
+                "parent2::child1::grandchild1",
+            ]
+        );
+
+        // grandchildren can be reparented under the same root
+        col.reparent_tags(
+            &["parent2::child1::grandchild1".to_string()],
+            Some("parent2".to_string()),
+        )?;
+
+        assert_eq!(
+            alltags(&col),
+            &[
+                "ab",
+                "ab::a",
+                "another",
+                "parent1",
+                "parent2",
+                "parent2::child1",
+                "parent2::grandchild1",
             ]
         );
 

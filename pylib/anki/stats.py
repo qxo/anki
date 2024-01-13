@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import datetime
 import json
 import random
 import time
@@ -39,7 +38,7 @@ def _legacy_card_stats(
     if ({1 if _legacy_nightmode else 0}) {{
         document.documentElement.className = "night-mode";
     }}
-    const {varName} = anki.cardInfo(document.getElementById('{random_id}'));
+    const {varName} = anki.setupCardInfo(document.getElementById('{random_id}'));
     {varName}.then((c) => c.$set({{ cardId: {card_id}, includeRevlog: {str(include_revlog).lower()} }}));
 </script>
     """
@@ -63,7 +62,7 @@ class CardStats:
         self.txt += self.makeLine(k, v)
 
     def makeLine(self, k: str, v: str | int) -> str:
-        txt = "<tr><td align=left style='padding-right: 3px;'>"
+        txt = "<tr><td align=start style='padding-right: 3px;'>"
         txt += f"<b>{k}</b></td><td>{v}</td></tr>"
         return txt
 
@@ -153,7 +152,7 @@ sum(case when type = {REVLOG_LRN} then 1 else 0 end), /* learning */
 sum(case when type = {REVLOG_REV} then 1 else 0 end), /* review */
 sum(case when type = {REVLOG_RELRN} then 1 else 0 end), /* relearn */
 sum(case when type = {REVLOG_CRAM} then 1 else 0 end) /* filter */
-from revlog where id > ? """
+from revlog where type != {REVLOG_RESCHED} and id > ? """
             + lim,
             (self.col.sched.day_cutoff - 86400) * 1000,
         )
@@ -164,6 +163,7 @@ from revlog where id > ? """
         rev = rev or 0
         relrn = relrn or 0
         filt = filt or 0
+
         # studied
         def bold(s: str) -> str:
             return "<b>" + str(s) + "</b>"
@@ -462,11 +462,11 @@ group by day order by day"""
         totd: dict[int, Any] = {}
         alltot = []
         allcnt: float = 0
-        for (n, col, lab) in spec:
+        for n, col, lab in spec:
             totcnt[n] = 0.0
             totd[n] = []
         for row in data:
-            for (n, col, lab) in spec:
+            for n, col, lab in spec:
                 if n not in sep:
                     sep[n] = []
                 sep[n].append((row[0], row[n]))
@@ -475,7 +475,7 @@ group by day order by day"""
                 totd[n].append((row[0], totcnt[n]))
             alltot.append((row[0], allcnt))
         ret = []
-        for (n, col, lab) in spec:
+        for n, col, lab in spec:
             if len(totd[n]) and totcnt[n]:
                 # bars
                 ret.append(dict(data=sep[n], color=col, label=lab))
@@ -599,7 +599,7 @@ group by day order by day)"""
         totd = []
         if not ivls or not all:
             return ""
-        for (grp, cnt) in ivls:
+        for grp, cnt in ivls:
             tot += cnt
             totd.append((grp, tot / float(all) * 100))
         if self.type == PERIOD_MONTH:
@@ -670,7 +670,7 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
         d: dict[str, list] = {"lrn": [], "yng": [], "mtr": []}
         types = ("lrn", "yng", "mtr")
         eases = self._eases()
-        for (type, ease, cnt) in eases:
+        for type, ease, cnt in eases:
             if type == CARD_TYPE_LRN:
                 ease += 5
             elif type == CARD_TYPE_REV:
@@ -690,8 +690,7 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
             [13, 3],
             [14, 4],
         ]
-        if self.col.sched_ver() != 1:
-            ticks.insert(3, [4, 4])
+        ticks.insert(3, [4, 4])
         txt = self._title(
             "Answer Buttons", "The number of times you have pressed each button."
         )
@@ -711,7 +710,7 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
 
     def _easeInfo(self, eases: list[tuple[int, int, int]]) -> str:
         types = {PERIOD_MONTH: [0, 0], PERIOD_YEAR: [0, 0], PERIOD_LIFE: [0, 0]}
-        for (type, ease, cnt) in eases:
+        for type, ease, cnt in eases:
             if ease == 1:
                 types[type][0] += cnt
             else:
@@ -747,20 +746,17 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
                 "id > %d" % ((self.col.sched.day_cutoff - (days * 86400)) * 1000)
             )
         if lims:
-            lim = "where " + " and ".join(lims)
+            lim = "and " + " and ".join(lims)
         else:
             lim = ""
-        if self.col.sched_ver() == 1:
-            ease4repl = "3"
-        else:
-            ease4repl = "ease"
+        ease4repl = "ease"
         return self.col.db.all(
             f"""
 select (case
 when type in ({REVLOG_LRN},{REVLOG_RELRN}) then 0
 when lastIvl < 21 then 1
 else 2 end) as thetype,
-(case when type in ({REVLOG_LRN},{REVLOG_RELRN}) and ease = 4 then %s else ease end), count() from revlog %s
+(case when type in ({REVLOG_LRN},{REVLOG_RELRN}) and ease = 4 then %s else ease end), count() from revlog where type != {REVLOG_RESCHED} %s
 group by thetype, ease
 order by thetype, ease"""
             % (ease4repl, lim)
@@ -840,11 +836,7 @@ order by thetype, ease"""
         lim = self._revlogLimit()
         if lim:
             lim = " and " + lim
-        if self.col.sched_ver() == 1:
-            sd = datetime.datetime.fromtimestamp(self.col.crt)
-            rolloverHour = sd.hour
-        else:
-            rolloverHour = self.col.conf.get("rollover", 4)
+        rolloverHour = self.col.conf.get("rollover", 4)
         pd = self._periodDays()
         if pd:
             lim += " and id > %d" % ((self.col.sched.day_cutoff - (86400 * pd)) * 1000)
@@ -909,12 +901,12 @@ when you answer "good" on a review."""
         colon = ":"
         if bold:
             i.append(
-                ("<tr><td width=200 align=right>%s%s</td><td><b>%s</b></td></tr>")
+                ("<tr><td width=200 align=start>%s%s</td><td><b>%s</b></td></tr>")
                 % (a, colon, b)
             )
         else:
             i.append(
-                ("<tr><td width=200 align=right>%s%s</td><td>%s</td></tr>")
+                ("<tr><td width=200 align=end>%s%s</td><td>%s</td></tr>")
                 % (a, colon, b)
             )
 

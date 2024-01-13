@@ -4,16 +4,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
     import IconConstrain from "./IconConstrain.svelte";
-    import { getContext, onMount, createEventDispatcher } from "svelte";
-    import { dropdownKey } from "./context-keys";
-    import { pageTheme } from "../sveltelib/theme";
-    import type { DropdownProps } from "./dropdown";
 
     export let id: string | undefined = undefined;
     let className = "";
     export { className as class };
 
     export let tooltip: string | undefined = undefined;
+    export let primary = false;
     export let active = false;
     export let disabled = false;
     export let tabbable = false;
@@ -21,25 +18,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     export let iconSize = 75;
     export let widthMultiplier = 1;
     export let flipX = false;
-
-    let buttonRef: HTMLButtonElement;
-
-    const dropdownProps = getContext<DropdownProps>(dropdownKey) ?? { dropdown: false };
-
-    const dispatch = createEventDispatcher();
-    onMount(() => dispatch("mount", { button: buttonRef }));
 </script>
 
 <button
-    bind:this={buttonRef}
     {id}
-    class="icon-button btn {className}"
+    class="icon-button {className}"
     class:active
-    class:dropdown-toggle={dropdownProps.dropdown}
-    class:btn-day={!$pageTheme.isDark}
-    class:btn-night={$pageTheme.isDark}
+    class:primary
     title={tooltip}
-    {...dropdownProps}
     {disabled}
     tabindex={tabbable ? 0 : -1}
     on:click
@@ -54,17 +40,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     @use "sass/button-mixins" as button;
 
     .icon-button {
-        padding: 0;
-        font-size: var(--base-font-size);
+        @include button.base($active-class: active);
+        &.primary {
+            @include button.base($primary: true);
+        }
+        @include button.border-radius;
+
+        padding: 0 var(--padding-inline, 0);
+        font-size: var(--font-size);
         height: var(--buttons-size);
-
-        @include button.btn-border-radius;
-    }
-
-    @include button.btn-day;
-    @include button.btn-night;
-
-    .dropdown-toggle::after {
-        margin-right: 0.25rem;
+        min-width: calc(var(--buttons-size) * 0.75);
     }
 </style>

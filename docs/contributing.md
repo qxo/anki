@@ -3,7 +3,7 @@
 For info on contributing things other than code, such as translations, decks
 and add-ons, please see https://docs.ankiweb.net/contrib
 
-With most users now on 2.1, the past year has been focused on paying down some
+With most users now on 2.1, the past 2 years have been focused on paying down some
 of the technical debt that Anki's codebase has built up over the years, and making
 changes that will make future maintenance and refactoring easier. A lot of Anki's
 "business logic" has been migrated to Rust, which AnkiMobile and AnkiDroid
@@ -13,7 +13,7 @@ Considerable effort has also been put into improving the Python side of things,
 with type hints added to the majority of the codebase, automatic linting/formatting,
 and refactoring of parts of the code.
 
-The scheduling code and import/export code remains to be done, and this will likely
+The import/export code remains to be done, and this will likely
 take a number of months to work through. Until that is complete, new features
 will not be the top priority, unless they are easy wins as part of the refactoring
 process.
@@ -89,6 +89,14 @@ The hook code is automatically generated using the definitions in
 pylib/tools/genhooks.py and qt/tools/genhooks_gui.py. Adding a new definition
 in one of those files will update the generated files.
 
+If you want to change an existing hook to, for example, receive an additional
+argument, you must leave the existing hook unchanged to preserve backwards
+compatibility. Create a new definition for your hook with a similar name and
+include the properties `replaces="name_of_old_hook"` and
+`replaced_hook_args=["..."]` in the definition of the new hook. If the old hook
+has a legacy hook, you must not add the legacy hook to the definition of the
+new hook.
+
 ## Translations
 
 For information on adding new translatable strings to Anki, please see
@@ -96,13 +104,13 @@ https://translating.ankiweb.net/anki/developers
 
 ## Tests Must Pass
 
-Please make sure 'bazel test //...' completes successfully before submitting code.
+Please make sure 'ninja check' completes successfully before submitting code.
 You can do this automatically by adding the following into
 .git/hooks/pre-commit or .git/hooks/pre-push and making it executable.
 
 ```sh
 #!/bin/bash
-bazel test //...
+./ninja check
 ```
 
 You may want to explicitly set PATH to your normal shell PATH in that script,

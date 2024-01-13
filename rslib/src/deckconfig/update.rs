@@ -3,17 +3,24 @@
 
 //! Updating configs in bulk, from the deck options screen.
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter;
 
-use crate::{
-    backend_proto as pb,
-    backend_proto::deck_configs_for_update::{ConfigWithExtra, CurrentDeck},
-    config::StringKey,
-    prelude::*,
-};
+use anki_proto::deck_config::deck_configs_for_update::current_deck::Limits;
+use anki_proto::deck_config::deck_configs_for_update::ConfigWithExtra;
+use anki_proto::deck_config::deck_configs_for_update::CurrentDeck;
+use anki_proto::deck_config::UpdateDeckConfigsMode;
+use anki_proto::decks::deck::normal::DayLimit;
+use fsrs::DEFAULT_WEIGHTS;
+
+use crate::config::StringKey;
+use crate::decks::NormalDeck;
+use crate::prelude::*;
+use crate::scheduler::fsrs::memory_state::UpdateMemoryStateRequest;
+use crate::search::JoinSearches;
+use crate::search::SearchNode;
+use crate::storage::comma_separated_ids;
 
 #[derive(Debug, Clone)]
 pub struct UpdateDeckConfigsRequest {
@@ -21,8 +28,13 @@ pub struct UpdateDeckConfigsRequest {
     /// Deck will be set to last provided deck config.
     pub configs: Vec<DeckConfig>,
     pub removed_config_ids: Vec<DeckConfigId>,
-    pub apply_to_children: bool,
+    pub mode: UpdateDeckConfigsMode,
     pub card_state_customizer: String,
+    pub limits: Limits,
+    pub new_cards_ignore_review_limit: bool,
+    pub apply_all_parent_limits: bool,
+    pub fsrs: bool,
+    pub fsrs_reschedule: bool,
 }
 
 impl Collection {
@@ -30,18 +42,21 @@ impl Collection {
     pub fn get_deck_configs_for_update(
         &mut self,
         deck: DeckId,
-    ) -> Result<pb::DeckConfigsForUpdate> {
-        Ok(pb::DeckConfigsForUpdate {
+    ) -> Result<anki_proto::deck_config::DeckConfigsForUpdate> {
+        let mut defaults = DeckConfig::default();
+        defaults.inner.fsrs_weights = DEFAULT_WEIGHTS.into();
+        Ok(anki_proto::deck_config::DeckConfigsForUpdate {
             all_config: self.get_deck_config_with_extra_for_update()?,
             current_deck: Some(self.get_current_deck_for_update(deck)?),
-            defaults: Some(DeckConfig::default().into()),
+            defaults: Some(defaults.into()),
             schema_modified: self
                 .storage
                 .get_collection_timestamps()?
                 .schema_changed_since_sync(),
-            v3_scheduler: self.get_config_bool(BoolKey::Sched2021),
-            have_addons: false,
             card_state_customizer: self.get_config_string(StringKey::CardStateCustomizer),
+            new_cards_ignore_review_limit: self.get_config_bool(BoolKey::NewCardsIgnoreReviewLimit),
+            apply_all_parent_limits: self.get_config_bool(BoolKey::ApplyAllParentLimits),
+            fsrs: self.get_config_bool(BoolKey::Fsrs),
         })
     }
 
@@ -82,16 +97,19 @@ impl Collection {
     }
 
     fn get_current_deck_for_update(&mut self, deck: DeckId) -> Result<CurrentDeck> {
-        let deck = self.get_deck(deck)?.ok_or(AnkiError::NotFound)?;
+        let deck = self.get_deck(deck)?.or_not_found(deck)?;
+        let normal = deck.normal()?;
+        let today = self.timing_today()?.days_elapsed;
 
         Ok(CurrentDeck {
             name: deck.human_name(),
-            config_id: deck.normal()?.config_id,
+            config_id: normal.config_id,
             parent_config_ids: self
                 .parent_config_ids(&deck)?
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            limits: Some(normal_deck_to_limits(normal, today)),
         })
     }
 
@@ -109,31 +127,43 @@ impl Collection {
             .collect())
     }
 
-    fn update_deck_configs_inner(&mut self, mut input: UpdateDeckConfigsRequest) -> Result<()> {
-        if input.configs.is_empty() {
-            return Err(AnkiError::invalid_input("config not provided"));
-        }
+    fn update_deck_configs_inner(&mut self, mut req: UpdateDeckConfigsRequest) -> Result<()> {
+        require!(!req.configs.is_empty(), "config not provided");
         let configs_before_update = self.storage.get_deck_config_map()?;
         let mut configs_after_update = configs_before_update.clone();
 
         // handle removals first
-        for dcid in &input.removed_config_ids {
+        for dcid in &req.removed_config_ids {
             self.remove_deck_config_inner(*dcid)?;
             configs_after_update.remove(dcid);
         }
 
+        if req.mode == UpdateDeckConfigsMode::ComputeAllWeights {
+            self.compute_all_weights(&mut req)?;
+        }
+
         // add/update provided configs
-        for conf in &mut input.configs {
+        for conf in &mut req.configs {
+            let weight_len = conf.inner.fsrs_weights.len();
+            if weight_len == 17 {
+                for i in 0..17 {
+                    if !conf.inner.fsrs_weights[i].is_finite() {
+                        return Err(AnkiError::FsrsWeightsInvalid);
+                    }
+                }
+            } else if weight_len != 0 {
+                return Err(AnkiError::FsrsWeightsInvalid);
+            }
             self.add_or_update_deck_config(conf)?;
             configs_after_update.insert(conf.id, conf.clone());
         }
 
         // get selected deck and possibly children
-        let selected_deck_ids: HashSet<_> = if input.apply_to_children {
+        let selected_deck_ids: HashSet<_> = if req.mode == UpdateDeckConfigsMode::ApplyToChildren {
             let deck = self
                 .storage
-                .get_deck(input.target_deck_id)?
-                .ok_or(AnkiError::NotFound)?;
+                .get_deck(req.target_deck_id)?
+                .or_not_found(req.target_deck_id)?;
             self.storage
                 .child_decks(&deck)?
                 .iter()
@@ -141,29 +171,40 @@ impl Collection {
                 .map(|d| d.id)
                 .collect()
         } else {
-            [input.target_deck_id].iter().cloned().collect()
+            [req.target_deck_id].iter().cloned().collect()
         };
 
         // loop through all normal decks
         let usn = self.usn()?;
-        let selected_config = input.configs.last().unwrap();
+        let today = self.timing_today()?.days_elapsed;
+        let selected_config = req.configs.last().unwrap();
+        let mut decks_needing_memory_recompute: HashMap<DeckConfigId, Vec<DeckId>> =
+            Default::default();
+        let fsrs_toggled = self.get_config_bool(BoolKey::Fsrs) != req.fsrs;
+        if fsrs_toggled {
+            self.set_config_bool_inner(BoolKey::Fsrs, req.fsrs)?;
+        }
         for deck in self.storage.get_all_decks()? {
             if let Ok(normal) = deck.normal() {
                 let deck_id = deck.id;
 
-                // previous order
+                // previous order & weights
                 let previous_config_id = DeckConfigId(normal.config_id);
-                let previous_order = configs_before_update
-                    .get(&previous_config_id)
+                let previous_config = configs_before_update.get(&previous_config_id);
+                let previous_order = previous_config
                     .map(|c| c.inner.new_card_insert_order())
                     .unwrap_or_default();
+                let previous_weights = previous_config.map(|c| &c.inner.fsrs_weights);
+                let previous_retention = previous_config.map(|c| c.inner.desired_retention);
 
-                // if a selected (sub)deck, or its old config was removed, update deck to point to new config
+                // if a selected (sub)deck, or its old config was removed, update deck to point
+                // to new config
                 let current_config_id = if selected_deck_ids.contains(&deck.id)
                     || !configs_after_update.contains_key(&previous_config_id)
                 {
                     let mut updated = deck.clone();
                     updated.normal_mut()?.config_id = selected_config.id.0;
+                    update_deck_limits(updated.normal_mut()?, &req.limits, today);
                     self.update_deck_inner(&mut updated, deck, usn)?;
                     selected_config.id
                 } else {
@@ -171,30 +212,187 @@ impl Collection {
                 };
 
                 // if new order differs, deck needs re-sorting
-                let current_order = configs_after_update
-                    .get(&current_config_id)
+                let current_config = configs_after_update.get(&current_config_id);
+                let current_order = current_config
                     .map(|c| c.inner.new_card_insert_order())
                     .unwrap_or_default();
                 if previous_order != current_order {
                     self.sort_deck(deck_id, current_order, usn)?;
                 }
+
+                // if weights differ, memory state needs to be recomputed
+                let current_weights = current_config.map(|c| &c.inner.fsrs_weights);
+                let current_retention = current_config.map(|c| c.inner.desired_retention);
+                if fsrs_toggled
+                    || previous_weights != current_weights
+                    || previous_retention != current_retention
+                {
+                    decks_needing_memory_recompute
+                        .entry(current_config_id)
+                        .or_default()
+                        .push(deck_id);
+                }
+
+                self.adjust_remaining_steps_in_deck(deck_id, previous_config, current_config, usn)?;
             }
         }
 
-        self.set_config_string_inner(StringKey::CardStateCustomizer, &input.card_state_customizer)?;
+        if !decks_needing_memory_recompute.is_empty() {
+            let input: Vec<(Option<UpdateMemoryStateRequest>, SearchNode)> =
+                decks_needing_memory_recompute
+                    .into_iter()
+                    .map(|(conf_id, search)| {
+                        let weights = configs_after_update.get(&conf_id).and_then(|c| {
+                            if req.fsrs {
+                                Some(UpdateMemoryStateRequest {
+                                    weights: c.inner.fsrs_weights.clone(),
+                                    desired_retention: c.inner.desired_retention,
+                                    max_interval: c.inner.maximum_review_interval,
+                                    reschedule: req.fsrs_reschedule,
+                                    sm2_retention: c.inner.sm2_retention,
+                                })
+                            } else {
+                                None
+                            }
+                        });
+                        Ok((
+                            weights,
+                            SearchNode::DeckIdsWithoutChildren(comma_separated_ids(&search)),
+                        ))
+                    })
+                    .collect::<Result<_>>()?;
+            self.update_memory_state(input)?;
+        }
+
+        self.set_config_string_inner(StringKey::CardStateCustomizer, &req.card_state_customizer)?;
+        self.set_config_bool_inner(
+            BoolKey::NewCardsIgnoreReviewLimit,
+            req.new_cards_ignore_review_limit,
+        )?;
+        self.set_config_bool_inner(BoolKey::ApplyAllParentLimits, req.apply_all_parent_limits)?;
 
         Ok(())
+    }
+
+    /// Adjust the remaining steps of cards in the given deck according to the
+    /// config change.
+    pub(crate) fn adjust_remaining_steps_in_deck(
+        &mut self,
+        deck: DeckId,
+        previous_config: Option<&DeckConfig>,
+        current_config: Option<&DeckConfig>,
+        usn: Usn,
+    ) -> Result<()> {
+        if let (Some(old), Some(new)) = (previous_config, current_config) {
+            for (search, old_steps, new_steps) in [
+                (
+                    SearchBuilder::learning_cards(),
+                    &old.inner.learn_steps,
+                    &new.inner.learn_steps,
+                ),
+                (
+                    SearchBuilder::relearning_cards(),
+                    &old.inner.relearn_steps,
+                    &new.inner.relearn_steps,
+                ),
+            ] {
+                if old_steps == new_steps {
+                    continue;
+                }
+                let search = search.clone().and(SearchNode::from_deck_id(deck, false));
+                for mut card in self.all_cards_for_search(search)? {
+                    self.adjust_remaining_steps(&mut card, old_steps, new_steps, usn)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn compute_all_weights(&mut self, req: &mut UpdateDeckConfigsRequest) -> Result<()> {
+        require!(req.fsrs, "FSRS must be enabled");
+
+        // frontend didn't include any unmodified deck configs, so we need to fill them
+        // in
+        let changed_configs: HashSet<_> = req.configs.iter().map(|c| c.id).collect();
+        let previous_last = req.configs.pop().or_invalid("no configs provided")?;
+        for config in self.storage.all_deck_config()? {
+            if !changed_configs.contains(&config.id) {
+                req.configs.push(config);
+            }
+        }
+        // other parts of the code expect the currently-selected preset to come last
+        req.configs.push(previous_last);
+
+        // calculate and apply weights to each preset
+        let config_len = req.configs.len() as u32;
+        for (idx, config) in req.configs.iter_mut().enumerate() {
+            let search = if config.inner.weight_search.trim().is_empty() {
+                SearchNode::Preset(config.name.clone())
+                    .try_into_search()?
+                    .to_string()
+            } else {
+                config.inner.weight_search.clone()
+            };
+            match self.compute_weights(&search, idx as u32 + 1, config_len) {
+                Ok(weights) => {
+                    if weights.fsrs_items >= 1000 {
+                        println!("{}: {:?}", config.name, weights.weights);
+                        config.inner.fsrs_weights = weights.weights;
+                    }
+                }
+                Err(AnkiError::Interrupted) => return Err(AnkiError::Interrupted),
+                Err(err) => {
+                    println!("{}: {}", config.name, err)
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn normal_deck_to_limits(deck: &NormalDeck, today: u32) -> Limits {
+    Limits {
+        review: deck.review_limit,
+        new: deck.new_limit,
+        review_today: deck.review_limit_today.map(|limit| limit.limit),
+        new_today: deck.new_limit_today.map(|limit| limit.limit),
+        review_today_active: deck
+            .review_limit_today
+            .map(|limit| limit.today == today)
+            .unwrap_or_default(),
+        new_today_active: deck
+            .new_limit_today
+            .map(|limit| limit.today == today)
+            .unwrap_or_default(),
+    }
+}
+
+fn update_deck_limits(deck: &mut NormalDeck, limits: &Limits, today: u32) {
+    deck.review_limit = limits.review;
+    deck.new_limit = limits.new;
+    update_day_limit(&mut deck.review_limit_today, limits.review_today, today);
+    update_day_limit(&mut deck.new_limit_today, limits.new_today, today);
+}
+
+fn update_day_limit(day_limit: &mut Option<DayLimit>, new_limit: Option<u32>, today: u32) {
+    if let Some(limit) = new_limit {
+        day_limit.replace(DayLimit { limit, today });
+    } else if let Some(limit) = day_limit {
+        // instead of setting to None, only make sure today is in the past,
+        // thus preserving last used value
+        limit.today = limit.today.min(today - 1);
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, deckconfig::NewCardInsertOrder};
+    use crate::deckconfig::NewCardInsertOrder;
+    use crate::tests::open_test_collection_with_learning_card;
+    use crate::tests::open_test_collection_with_relearning_card;
 
     #[test]
     fn updating() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note1 = nt.new_note();
         col.add_note(&mut note1, DeckId(1))?;
@@ -204,8 +402,10 @@ mod test {
             col.add_note(&mut note, DeckId(1))?;
         }
 
-        // add the key so it doesn't trigger a change below
+        // add the keys so it doesn't trigger a change below
         col.set_config_string_inner(StringKey::CardStateCustomizer, "")?;
+        col.set_config_bool_inner(BoolKey::NewCardsIgnoreReviewLimit, false)?;
+        col.set_config_bool_inner(BoolKey::ApplyAllParentLimits, false)?;
 
         // pretend we're in sync
         let stamps = col.storage.get_collection_timestamps()?;
@@ -235,8 +435,13 @@ mod test {
                 .map(|c| c.config.unwrap().into())
                 .collect(),
             removed_config_ids: vec![],
-            apply_to_children: false,
+            mode: UpdateDeckConfigsMode::Normal,
             card_state_customizer: "".to_string(),
+            limits: Limits::default(),
+            new_cards_ignore_review_limit: false,
+            apply_all_parent_limits: false,
+            fsrs: false,
+            fsrs_reschedule: false,
         };
         assert!(!col.update_deck_configs(input.clone())?.changes.had_change());
 
@@ -283,5 +488,67 @@ mod test {
         assert!(full_sync_required(&mut col));
 
         Ok(())
+    }
+
+    #[test]
+    fn should_increase_remaining_learning_steps_if_unpassed_learning_step_added() {
+        let mut col = open_test_collection_with_learning_card();
+        col.set_default_learn_steps(vec![1., 10., 100.]);
+        assert_eq!(col.get_first_card().remaining_steps, 3);
+    }
+
+    #[test]
+    fn should_keep_remaining_learning_steps_if_unpassed_relearning_step_added() {
+        let mut col = open_test_collection_with_learning_card();
+        col.set_default_relearn_steps(vec![1., 10., 100.]);
+        assert_eq!(col.get_first_card().remaining_steps, 2);
+    }
+
+    #[test]
+    fn should_keep_remaining_learning_steps_if_passed_learning_step_added() {
+        let mut col = open_test_collection_with_learning_card();
+        col.answer_good();
+        col.set_default_learn_steps(vec![1., 1., 10.]);
+        assert_eq!(col.get_first_card().remaining_steps, 1);
+    }
+
+    #[test]
+    fn should_keep_at_least_one_remaining_learning_step() {
+        let mut col = open_test_collection_with_learning_card();
+        col.answer_good();
+        col.set_default_learn_steps(vec![1.]);
+        assert_eq!(col.get_first_card().remaining_steps, 1);
+    }
+
+    #[test]
+    fn should_increase_remaining_relearning_steps_if_unpassed_relearning_step_added() {
+        let mut col = open_test_collection_with_relearning_card();
+        col.set_default_relearn_steps(vec![1., 10., 100.]);
+        assert_eq!(col.get_first_card().remaining_steps, 3);
+    }
+
+    #[test]
+    fn should_keep_remaining_relearning_steps_if_unpassed_learning_step_added() {
+        let mut col = open_test_collection_with_relearning_card();
+        col.set_default_learn_steps(vec![1., 10., 100.]);
+        assert_eq!(col.get_first_card().remaining_steps, 1);
+    }
+
+    #[test]
+    fn should_keep_remaining_relearning_steps_if_passed_relearning_step_added() {
+        let mut col = open_test_collection_with_relearning_card();
+        col.set_default_relearn_steps(vec![10., 100.]);
+        col.answer_good();
+        col.set_default_relearn_steps(vec![1., 10., 100.]);
+        assert_eq!(col.get_first_card().remaining_steps, 1);
+    }
+
+    #[test]
+    fn should_keep_at_least_one_remaining_relearning_step() {
+        let mut col = open_test_collection_with_relearning_card();
+        col.set_default_relearn_steps(vec![10., 100.]);
+        col.answer_good();
+        col.set_default_relearn_steps(vec![1.]);
+        assert_eq!(col.get_first_card().remaining_steps, 1);
     }
 }

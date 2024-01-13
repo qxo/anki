@@ -1,7 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{LearningQueueEntry, QueueEntry};
+use super::LearningQueueEntry;
+use super::QueueEntry;
 use crate::prelude::*;
 
 #[derive(Debug)]
@@ -63,12 +64,10 @@ impl Collection {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        card::{CardQueue, CardType},
-        collection::open_test_collection,
-        deckconfig::LeechAction,
-        prelude::*,
-    };
+    use crate::card::CardQueue;
+    use crate::card::CardType;
+    use crate::deckconfig::LeechAction;
+    use crate::prelude::*;
 
     fn add_note(col: &mut Collection, with_reverse: bool) -> Result<NoteId> {
         let nt = col
@@ -86,7 +85,7 @@ mod test {
     #[test]
     fn undo() -> Result<()> {
         // add a note
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nid = add_note(&mut col, true)?;
 
         // turn burying and leech suspension on
@@ -146,7 +145,7 @@ mod test {
             let deck = col.get_deck(DeckId(1))?.unwrap();
             assert_eq!(deck.common.review_studied, 1);
 
-            assert!(!col.get_next_card()?.is_some());
+            assert!(col.get_next_card()?.is_none());
 
             Ok(())
         };
@@ -193,7 +192,7 @@ mod test {
 
     #[test]
     fn undo_counts() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         if col.timing_today()?.near_cutoff() {
             return Ok(());
         }
@@ -247,7 +246,7 @@ mod test {
     #[test]
     fn redo_after_queue_invalidation_bug() -> Result<()> {
         // add a note to the default deck
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let _nid = add_note(&mut col, true)?;
 
         // add a deck and select it

@@ -1,9 +1,11 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{
-    interval_kind::IntervalKind, normal::NormalState, CardState, NextCardStates, StateContext,
-};
+use super::interval_kind::IntervalKind;
+use super::normal::NormalState;
+use super::CardState;
+use super::SchedulingStates;
+use super::StateContext;
 use crate::revlog::RevlogReviewKind;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,10 +22,10 @@ impl ReschedulingFilterState {
         self.original_state.revlog_kind()
     }
 
-    pub(crate) fn next_states(self, ctx: &StateContext) -> NextCardStates {
+    pub(crate) fn next_states(self, ctx: &StateContext) -> SchedulingStates {
         let normal = self.original_state.next_states(ctx);
         if ctx.in_filtered_deck {
-            NextCardStates {
+            SchedulingStates {
                 current: self.into(),
                 again: maybe_wrap(normal.again),
                 hard: maybe_wrap(normal.hard),

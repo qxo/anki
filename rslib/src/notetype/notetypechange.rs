@@ -3,14 +3,18 @@
 
 //! Updates to notes/cards when a note is moved to a different notetype.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-use super::{CardGenContext, Notetype, NotetypeKind};
-use crate::{
-    prelude::*,
-    search::{Node, SearchNode, SortMode, TemplateKind},
-    storage::comma_separated_ids,
-};
+use super::CardGenContext;
+use super::Notetype;
+use super::NotetypeKind;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::Node;
+use crate::search::SearchNode;
+use crate::search::TemplateKind;
+use crate::storage::comma_separated_ids;
 
 #[derive(Debug)]
 pub struct ChangeNotetypeInput {
@@ -33,7 +37,7 @@ pub struct NotetypeChangeInfo {
     pub new_template_names: Vec<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TemplateMap {
     pub removed: Vec<usize>,
     pub remapped: HashMap<usize, usize>,
@@ -73,10 +77,10 @@ impl Collection {
     ) -> Result<NotetypeChangeInfo> {
         let old_notetype = self
             .get_notetype(old_notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(old_notetype_id)?;
         let new_notetype = self
             .get_notetype(new_notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(new_notetype_id)?;
 
         let current_schema = self.storage.get_collection_timestamps()?.schema_change;
         let old_notetype_name = &old_notetype.name;
@@ -160,7 +164,7 @@ fn default_template_map(
         new_templates
             .iter_mut()
             .filter(|o| o.is_none())
-            .zip(remaining_templates.into_iter())
+            .zip(remaining_templates)
             .for_each(|(template, old_idx)| *template = Some(*old_idx));
 
         Some(new_templates)
@@ -198,24 +202,28 @@ fn default_field_map(current_notetype: &Notetype, new_notetype: &Notetype) -> Ve
     new_fields
         .iter_mut()
         .filter(|o| o.is_none())
-        .zip(remaining_fields.into_iter())
+        .zip(remaining_fields)
         .for_each(|(field, old_idx)| *field = Some(*old_idx));
 
     new_fields
 }
 
 impl Collection {
-    fn change_notetype_of_notes_inner(&mut self, input: ChangeNotetypeInput) -> Result<()> {
-        if input.current_schema != self.storage.get_collection_timestamps()?.schema_change {
-            return Err(AnkiError::invalid_input("schema changed"));
-        }
+    pub(crate) fn change_notetype_of_notes_inner(
+        &mut self,
+        input: ChangeNotetypeInput,
+    ) -> Result<()> {
+        require!(
+            input.current_schema == self.storage.get_collection_timestamps()?.schema_change,
+            "schema changed"
+        );
 
         let usn = self.usn()?;
         self.set_schema_modified()?;
         if let Some(new_templates) = input.new_templates {
             let old_notetype = self
                 .get_notetype(input.old_notetype_id)?
-                .ok_or(AnkiError::NotFound)?;
+                .or_not_found(input.old_notetype_id)?;
             self.update_cards_for_new_notetype(
                 &input.note_ids,
                 old_notetype.templates.len(),
@@ -242,8 +250,8 @@ impl Collection {
     /// Rewrite notes to match new notetype, and assigns new notetype id.
     ///
     /// `new_fields` should be the length of the new notetype's fields, and is a
-    /// list of the previous field index each field should be mapped to. If None,
-    /// the field is left empty.
+    /// list of the previous field index each field should be mapped to. If
+    /// None, the field is left empty.
     fn update_notes_for_new_notetype_and_generate_cards(
         &mut self,
         note_ids: &[NoteId],
@@ -253,12 +261,12 @@ impl Collection {
     ) -> Result<()> {
         let notetype = self
             .get_notetype(new_notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(new_notetype_id)?;
         let last_deck = self.get_last_deck_added_to_for_notetype(notetype.id);
-        let ctx = CardGenContext::new(&notetype, last_deck, usn);
+        let ctx = CardGenContext::new(notetype.as_ref(), last_deck, usn);
 
         for nid in note_ids {
-            let mut note = self.storage.get_note(*nid)?.ok_or(AnkiError::NotFound)?;
+            let mut note = self.storage.get_note(*nid)?.or_not_found(nid)?;
             let original = note.clone();
             remap_fields(note.fields_mut(), new_fields);
             note.notetype_id = new_notetype_id;
@@ -292,17 +300,11 @@ impl Collection {
         usn: Usn,
     ) -> Result<(), AnkiError> {
         if !map.removed.is_empty() {
-            let ords = Node::any(
-                map.removed
-                    .iter()
-                    .map(|o| TemplateKind::Ordinal(*o as u16))
-                    .map(Into::into),
-            );
-            self.search_cards_into_table(match_all![nids, ords], SortMode::NoOrder)?;
-            for card in self.storage.all_searched_cards()? {
+            let ords =
+                SearchBuilder::any(map.removed.iter().map(|o| TemplateKind::Ordinal(*o as u16)));
+            for card in self.all_cards_for_search(nids.and(ords))? {
                 self.remove_card_and_add_grave_undoable(card, usn)?;
             }
-            self.storage.clear_searched_cards_table()?;
         }
 
         Ok(())
@@ -315,20 +317,17 @@ impl Collection {
         usn: Usn,
     ) -> Result<(), AnkiError> {
         if !map.remapped.is_empty() {
-            let ords = Node::any(
+            let ords = SearchBuilder::any(
                 map.remapped
                     .keys()
-                    .map(|o| TemplateKind::Ordinal(*o as u16))
-                    .map(Into::into),
+                    .map(|o| TemplateKind::Ordinal(*o as u16)),
             );
-            self.search_cards_into_table(match_all![nids, ords], SortMode::NoOrder)?;
-            for mut card in self.storage.all_searched_cards()? {
+            for mut card in self.all_cards_for_search(nids.and(ords))? {
                 let original = card.clone();
                 card.template_idx =
                     *map.remapped.get(&(card.template_idx as usize)).unwrap() as u16;
                 self.update_card_inner(&mut card, original, usn)?;
             }
-            self.storage.clear_searched_cards_table()?;
         }
 
         Ok(())
@@ -344,7 +343,7 @@ impl Collection {
         notetype_id: NotetypeId,
         usn: Usn,
     ) -> Result<()> {
-        let notetype = self.get_notetype(notetype_id)?.ok_or(AnkiError::NotFound)?;
+        let notetype = self.get_notetype(notetype_id)?.or_not_found(notetype_id)?;
 
         if notetype.config.kind() == NotetypeKind::Normal {
             // cloze -> normal change requires clean up
@@ -354,7 +353,6 @@ impl Collection {
             {
                 self.remove_card_and_add_grave_undoable(card, usn)?;
             }
-            self.storage.clear_searched_notes_table()?;
         }
 
         Ok(())
@@ -379,11 +377,11 @@ fn remap_fields(fields: &mut Vec<String>, new_fields: &[Option<usize>]) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, error::Result};
+    use crate::error::Result;
 
     #[test]
     fn field_map() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut basic = col
             .storage
             .get_notetype(col.get_current_notetype_id().unwrap())?
@@ -450,7 +448,7 @@ mod test {
 
     #[test]
     fn basic() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let basic = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = basic.new_note();
         note.set_field(0, "1")?;
@@ -486,7 +484,7 @@ mod test {
 
     #[test]
     fn field_count_change() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let basic = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = basic.new_note();
         note.set_field(0, "1")?;
@@ -507,7 +505,7 @@ mod test {
 
     #[test]
     fn cloze() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let basic = col
             .get_notetype_by_name("Basic (and reversed card)")?
             .unwrap();
@@ -536,7 +534,8 @@ mod test {
         let cards = col.storage.all_cards_of_note(note.id)?;
         assert_eq!(cards.len(), 2);
 
-        // but any cards above the available templates should be removed when converting from cloze->normal
+        // but any cards above the available templates should be removed when converting
+        // from cloze->normal
         let input = ChangeNotetypeInput {
             note_ids: vec![note.id],
             ..col.notetype_change_info(basic.id, cloze.id)?.input

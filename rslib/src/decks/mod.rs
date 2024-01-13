@@ -4,36 +4,37 @@
 mod addupdate;
 mod counts;
 mod current;
-mod filtered;
+pub mod filtered;
 pub(crate) mod limits;
 mod name;
 mod remove;
 mod reparent;
 mod schema11;
+mod service;
 mod stats;
-mod tree;
+pub mod tree;
 pub(crate) mod undo;
 
 use std::sync::Arc;
 
+pub use anki_proto::decks::deck::filtered::search_term::Order as FilteredSearchOrder;
+pub use anki_proto::decks::deck::filtered::SearchTerm as FilteredSearchTerm;
+pub use anki_proto::decks::deck::kind_container::Kind as DeckKind;
+pub use anki_proto::decks::deck::Common as DeckCommon;
+pub use anki_proto::decks::deck::Filtered as FilteredDeck;
+pub use anki_proto::decks::deck::KindContainer as DeckKindContainer;
+pub use anki_proto::decks::deck::Normal as NormalDeck;
+pub use anki_proto::decks::Deck as DeckProto;
 pub(crate) use counts::DueCounts;
 pub(crate) use name::immediate_parent_name;
 pub use name::NativeDeckName;
 pub use schema11::DeckSchema11;
 
-pub use crate::backend_proto::{
-    deck::{
-        filtered::{search_term::Order as FilteredSearchOrder, SearchTerm as FilteredSearchTerm},
-        kind_container::Kind as DeckKind,
-        Common as DeckCommon, Filtered as FilteredDeck, KindContainer as DeckKindContainer,
-        Normal as NormalDeck,
-    },
-    Deck as DeckProto,
-};
-use crate::{
-    define_newtype, error::FilteredDeckError, markdown::render_markdown, prelude::*,
-    text::sanitize_html_no_images,
-};
+use crate::define_newtype;
+use crate::error::FilteredDeckError;
+use crate::markdown::render_markdown;
+use crate::prelude::*;
+use crate::text::sanitize_html_no_images;
 
 define_newtype!(DeckId, i64);
 
@@ -79,7 +80,7 @@ impl Deck {
     }
 
     /// Returns deck config ID if deck is a normal deck.
-    pub(crate) fn config_id(&self) -> Option<DeckConfigId> {
+    pub fn config_id(&self) -> Option<DeckConfigId> {
         if let DeckKind::Normal(ref norm) = self.kind {
             Some(DeckConfigId(norm.config_id))
         } else {
@@ -91,19 +92,17 @@ impl Deck {
 
     #[allow(dead_code)]
     pub(crate) fn normal(&self) -> Result<&NormalDeck> {
-        if let DeckKind::Normal(normal) = &self.kind {
-            Ok(normal)
-        } else {
-            Err(AnkiError::invalid_input("deck not normal"))
+        match &self.kind {
+            DeckKind::Normal(normal) => Ok(normal),
+            _ => invalid_input!("deck not normal"),
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn normal_mut(&mut self) -> Result<&mut NormalDeck> {
-        if let DeckKind::Normal(normal) = &mut self.kind {
-            Ok(normal)
-        } else {
-            Err(AnkiError::invalid_input("deck not normal"))
+        match &mut self.kind {
+            DeckKind::Normal(normal) => Ok(normal),
+            _ => invalid_input!("deck not normal"),
         }
     }
 
@@ -160,7 +159,7 @@ impl Collection {
 }
 
 impl Collection {
-    pub(crate) fn get_deck(&mut self, did: DeckId) -> Result<Option<Arc<Deck>>> {
+    pub fn get_deck(&mut self, did: DeckId) -> Result<Option<Arc<Deck>>> {
         if let Some(deck) = self.state.deck_cache.get(&did) {
             return Ok(Some(deck.clone()));
         }
@@ -179,7 +178,7 @@ impl Collection {
 
     /// Get a deck based on its human name. If you have a machine name,
     /// use the method in storage instead.
-    pub(crate) fn get_deck_id(&self, human_name: &str) -> Result<Option<DeckId>> {
+    pub fn get_deck_id(&self, human_name: &str) -> Result<Option<DeckId>> {
         self.storage
             .get_deck_id(NativeDeckName::from_human_name(human_name).as_native_str())
     }
@@ -187,7 +186,8 @@ impl Collection {
 
 #[cfg(test)]
 mod test {
-    use crate::{collection::open_test_collection, prelude::*, search::SortMode};
+    use crate::prelude::*;
+    use crate::search::SortMode;
 
     fn sorted_names(col: &Collection) -> Vec<String> {
         col.storage
@@ -200,7 +200,7 @@ mod test {
 
     #[test]
     fn adding_updating() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let deck1 = col.get_or_create_normal_deck("foo")?;
         let deck2 = col.get_or_create_normal_deck("FOO")?;
@@ -220,7 +220,7 @@ mod test {
 
     #[test]
     fn renaming() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let _ = col.get_or_create_normal_deck("foo::bar::baz")?;
         let mut top_deck = col.get_or_create_normal_deck("foo")?;
@@ -291,7 +291,7 @@ mod test {
     fn default() -> Result<()> {
         // deleting the default deck will remove cards, but bring the deck back
         // as a top level deck
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let mut default = col.get_or_create_normal_deck("default")?;
         default.name = NativeDeckName::from_native_str("one\x1ftwo");

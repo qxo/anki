@@ -1,4 +1,10 @@
 -errors-support-site = [support site](https://help.ankiweb.net)
+errors-standard-popup2 =
+    Anki encountered a problem. Please follow the troubleshooting steps.
+errors-may-be-addon = The problem may be caused by an add-on.
+errors-troubleshooting-button = Troubleshooting
+errors-copy-debug-info-button = Copy Debug Info
+errors-copied-to-clipboard = Copied to clipboard
 errors-standard-popup =
     # Error
     
@@ -7,7 +13,6 @@ errors-standard-popup =
     
     If problems persist, please report the problem on our { -errors-support-site }.
     Please copy and paste the information below into your report.
--errors-addon-support-site = [add-on support site](https://help.ankiweb.net/discussions/add-ons/)
 errors-addons-active-popup =
     # Error
     
@@ -19,7 +24,7 @@ errors-addons-active-popup =
     repeating until you discover the add-on that is causing the problem.
     
     When you've discovered the add-on that is causing the problem, please
-    report the issue on the { -errors-addon-support-site }.
+    report the issue to the add-on author.
     
     Debug info:
 errors-accessing-db =
@@ -40,4 +45,7 @@ errors-unable-open-collection =
     Anki was unable to open your collection file. If problems persist after restarting your computer, please use the Open Backup button in the profile manager.
     
     Debug info:
-errors-windows-tts-runtime-error = The TTS service failed. Please ensure Windows updates are installed, try restarting your computer, and try using a different voice.
+errors-windows-tts-runtime-error = The TTS service failed. Please ensure Windows updates are installed, try restarting your computer, or try a different voice.
+
+## OBSOLETE; you do not need to translate this
+

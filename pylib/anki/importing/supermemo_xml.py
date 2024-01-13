@@ -22,8 +22,9 @@ class SmartDict(dict):
     """
     See http://www.peterbe.com/plog/SmartDict
     Copyright 2005, Peter Bengtsson, peter@fry-it.com
+    0BSD
 
-    A smart dict can be instanciated either from a pythonic dict
+    A smart dict can be instantiated either from a pythonic dict
     or an instance object (eg. SQL recordsets) but it ensures that you can
     do all the convenient lookups such as x.first_name, x['first_name'] or
     x.get('first_name').
@@ -65,7 +66,6 @@ class SuperMemoElement(SmartDict):
 
 # This is an AnkiImporter
 class SupermemoXmlImporter(NoteImporter):
-
     needMapper = False
     allowHTML = True
 
@@ -84,7 +84,7 @@ class SupermemoXmlImporter(NoteImporter):
     """
 
     def __init__(self, col: Collection, file: str) -> None:
-        """Initialize internal varables.
+        """Initialize internal variables.
         Pameters to be exposed to GUI are stored in self.META"""
         NoteImporter.__init__(self, col, file)
         m = _legacy_add_basic_model(self.col)
@@ -108,7 +108,7 @@ class SupermemoXmlImporter(NoteImporter):
         self.cntMeta.popTitles = False
         self.cntMeta.title = []
 
-        # META stores controls of import scritp, should be
+        # META stores controls of import script, should be
         # exposed to import dialog. These are default values.
         self.META = SmartDict()
         self.META.resetLearningData = False  # implemented
@@ -116,7 +116,7 @@ class SupermemoXmlImporter(NoteImporter):
         self.META.loggerLevel = 2  # implemented 0no,1info,2error,3debug
         self.META.tagAllTopics = True
         self.META.pathsToBeTagged = [
-            "English for begginers",
+            "English for beginners",
             "Advanced English 97",
             "Phrasal Verbs",
         ]  # path patterns to be tagged - in gui entered like 'Advanced English 97|My Vocablary'
@@ -145,7 +145,7 @@ class SupermemoXmlImporter(NoteImporter):
 
     def _decode_htmlescapes(self, html: str) -> str:
         """Unescape HTML code."""
-        # In case of bad formated html you can import MinimalSoup etc.. see BeautifulSoup source code
+        # In case of bad formatted html you can import MinimalSoup etc.. see BeautifulSoup source code
         from bs4 import BeautifulSoup
 
         # my sm2004 also ecaped & char in escaped sequences.
@@ -186,7 +186,6 @@ class SupermemoXmlImporter(NoteImporter):
     ## DEFAULT IMPORTER METHODS
 
     def foreignNotes(self) -> list[ForeignNote]:
-
         # Load file and parse it by minidom
         self.loadSource(self.file)
 
@@ -254,7 +253,7 @@ class SupermemoXmlImporter(NoteImporter):
             # normalize - remove diacritic punctuation from unicode chars to ascii
             item.lTitle = [self._unicode2ascii(topic) for topic in item.lTitle]
 
-            # Transfrom xyz / aaa / bbb / ccc on Title path to Tag  xyzAaaBbbCcc
+            # Transform xyz / aaa / bbb / ccc on Title path to Tag  xyzAaaBbbCcc
             #  clean things like [999] or [111-2222] from title path, example: xyz / [1000-1200] zyx / xyz
             #  clean whitespaces
             #  set Capital letters for first char of the word
@@ -402,10 +401,9 @@ class SupermemoXmlImporter(NoteImporter):
         # if smel.Lapses != None and smel.Interval != None and smel.Question != None and smel.Answer != None:
         if smel.Title is None and smel.Question is not None and smel.Answer is not None:
             if smel.Answer.strip() != "" and smel.Question.strip() != "":
-
                 # migrate only memorized otherway skip/continue
                 if self.META.onlyMemorizedItems and not (int(smel.Interval) > 0):
-                    self.logger("Element skiped  \t- not memorized ...", level=3)
+                    self.logger("Element skipped  \t- not memorized ...", level=3)
                 else:
                     # import sm element data to Anki
                     self.addItemToCards(smel)
@@ -418,11 +416,11 @@ class SupermemoXmlImporter(NoteImporter):
                             "\t{} {}".format((key + ":").ljust(15), smel[key]), level=3
                         )
             else:
-                self.logger("Element skiped  \t- no valid Q and A ...", level=3)
+                self.logger("Element skipped  \t- no valid Q and A ...", level=3)
 
         else:
             # now we know that item was topic
-            # parseing of whole node is now finished
+            # parsing of whole node is now finished
 
             # test if it's really topic
             if smel.Title is not None:

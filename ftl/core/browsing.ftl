@@ -12,8 +12,7 @@ browsing-browser-appearance = Browser Appearance
 browsing-browser-options = Browser Options
 browsing-buried = Buried
 browsing-card = Card
-# Exactly one character representing 'Cards'; should differ from browsing-note-initial.
-browsing-card-initial = C
+browsing-cards = Cards
 browsing-card-list = Card List
 browsing-cards-cant-be-manually-moved-into = Cards can't be manually moved into a filtered deck.
 browsing-cards-deleted =
@@ -59,8 +58,7 @@ browsing-new-note-type = New note type:
 browsing-no-flag = No Flag
 browsing-no-selection = No cards or notes selected.
 browsing-note = Note
-# Exactly one character representing 'Notes'; should differ from browsing-card-initial.
-browsing-note-initial = N
+browsing-notes = Notes
 browsing-optional-filter = Optional filter:
 browsing-override-back-template = Override back template:
 browsing-override-font = Override font:
@@ -91,7 +89,8 @@ browsing-suspended = Suspended
 browsing-tag-duplicates = Tag Duplicates
 browsing-tag-rename-warning-empty = You can't rename a tag that has no notes.
 browsing-target-field = Target field:
-browsing-toggle-showing-cards-notes = Toggle Showing Cards/Notes
+browsing-toggle-bury = Toggle Bury
+browsing-toggle-showing-cards-notes = Toggle Cards/Notes
 browsing-toggle-mark = Toggle Mark
 browsing-toggle-suspend = Toggle Suspend
 browsing-treat-input-as-regular-expression = Treat input as regular expression
@@ -164,6 +163,11 @@ browsing-reparented-decks =
         [one] Renamed { $count } deck.
        *[other] Renamed { $count } decks.
     }
+browsing-sidebar-card-state-review = Review
 
-## obsolete; no need to translate
+## NO NEED TO TRANSLATE. This text is no longer used by Anki, and will be removed in the future.
 
+# Exactly one character representing 'Cards'; should differ from browsing-note-initial.
+browsing-card-initial = C
+# Exactly one character representing 'Notes'; should differ from browsing-card-initial.
+browsing-note-initial = N

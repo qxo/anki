@@ -21,6 +21,8 @@ from aqt.qt import *
 from aqt.sound import av_player
 from aqt.utils import (
     HelpPage,
+    add_close_shortcut,
+    ask_user_dialog,
     askUser,
     downArrow,
     openHelp,
@@ -47,8 +49,10 @@ class AddCards(QMainWindow):
         self.setMinimumWidth(400)
         self.setup_choosers()
         self.setupEditor()
-        self.setupButtons()
+        add_close_shortcut(self)
         self._load_new_note()
+        self.setupButtons()
+        self.col.add_image_occlusion_notetype()
         self.history: list[NoteId] = []
         self._last_added_note: Optional[Note] = None
         gui_hooks.operation_did_execute.append(self.on_operation_did_execute)
@@ -106,10 +110,11 @@ class AddCards(QMainWindow):
         self.addButton = bb.addButton(tr.actions_add(), ar)
         qconnect(self.addButton.clicked, self.add_current_note)
         self.addButton.setShortcut(QKeySequence("Ctrl+Return"))
-        # qt5.14 doesn't handle numpad enter on Windows
+        # qt5.14+ doesn't handle numpad enter on Windows
         self.compat_add_shorcut = QShortcut(QKeySequence("Ctrl+Enter"), self)
         qconnect(self.compat_add_shorcut.activated, self.addButton.click)
         self.addButton.setToolTip(shortcut(tr.adding_add_shortcut_ctrlandenter()))
+
         # close
         self.closeButton = QPushButton(tr.actions_close())
         self.closeButton.setAutoDefault(False)
@@ -149,40 +154,46 @@ class AddCards(QMainWindow):
         self._last_added_note = None
 
         # copy fields into new note with the new notetype
-        old = self.editor.note
-        new = self._new_note()
-        if old:
-            old_fields = list(old.keys())
-            new_fields = list(new.keys())
-            copied_fields = set()
-            for n, f in enumerate(new.note_type()["flds"]):
+        old_note = self.editor.note
+        new_note = self._new_note()
+        if old_note:
+            old_field_names = list(old_note.keys())
+            new_field_names = list(new_note.keys())
+            copied_field_names = set()
+            for f in new_note.note_type()["flds"]:
                 field_name = f["name"]
                 # copy identical non-empty fields
-                if field_name in old_fields and old[field_name]:
-                    new[field_name] = old[field_name]
-                    copied_fields.add(field_name)
+                if field_name in old_field_names and old_note[field_name]:
+                    new_note[field_name] = old_note[field_name]
+                    copied_field_names.add(field_name)
             new_idx = 0
-            for old_idx, old_field in enumerate(old_fields):
+            for old_idx, old_field_value in enumerate(old_field_names):
                 # skip previously copied identical fields in new note
                 while (
-                    new_idx < len(new_fields) and new_fields[new_idx] in copied_fields
+                    new_idx < len(new_field_names)
+                    and new_field_names[new_idx] in copied_field_names
                 ):
                     new_idx += 1
-                if new_idx >= len(new_fields):
+                if new_idx >= len(new_field_names):
                     break
                 # copy non-empty old fields
-                if not old_field in copied_fields and old.fields[old_idx]:
-                    new.fields[new_idx] = old.fields[old_idx]
+                if (
+                    not old_field_value in copied_field_names
+                    and old_note.fields[old_idx]
+                ):
+                    new_note.fields[new_idx] = old_note.fields[old_idx]
                     new_idx += 1
 
-            new.tags = old.tags
+            new_note.tags = old_note.tags
 
         # and update editor state
-        self.editor.note = new
+        self.editor.note = new_note
         self.editor.loadNote(
-            focusTo=min(self.editor.last_field_index or 0, len(new.fields) - 1)
+            focusTo=min(self.editor.last_field_index or 0, len(new_note.fields) - 1)
         )
-        gui_hooks.add_cards_did_change_note_type(old.note_type(), new.note_type())
+        gui_hooks.addcards_did_change_note_type(
+            self, old_note.note_type(), new_note.note_type()
+        )
 
     def _load_new_note(self, sticky_fields_from: Optional[Note] = None) -> None:
         note = self._new_note()
@@ -245,7 +256,12 @@ class AddCards(QMainWindow):
         aqt.dialogs.open("Browser", self.mw, search=(SearchNode(nid=nid),))
 
     def add_current_note(self) -> None:
-        self.editor.call_after_note_saved(self._add_current_note)
+        if self.editor.current_notetype_is_image_occlusion():
+            self.editor.update_occlusions_field()
+            self.editor.call_after_note_saved(self._add_current_note)
+            self.editor.reset_image_occlusion()
+        else:
+            self.editor.call_after_note_saved(self._add_current_note)
 
     def _add_current_note(self) -> None:
         note = self.editor.note
@@ -275,7 +291,10 @@ class AddCards(QMainWindow):
         # no problem, duplicate, and confirmed cloze cases
         problem = None
         if result == NoteFieldsCheckResult.EMPTY:
-            problem = tr.adding_the_first_field_is_empty()
+            if self.editor.current_notetype_is_image_occlusion():
+                problem = tr.notetypes_no_occlusion_created2()
+            else:
+                problem = tr.adding_the_first_field_is_empty()
         elif result == NoteFieldsCheckResult.MISSING_CLOZE:
             if not askUser(tr.adding_you_have_a_cloze_deletion_note()):
                 return False
@@ -288,6 +307,11 @@ class AddCards(QMainWindow):
         problem = gui_hooks.add_cards_will_add_note(problem, note)
         if problem is not None:
             showWarning(problem, help=HelpPage.ADDING_CARD_AND_NOTE)
+            return False
+
+        optional_problems: list[str] = []
+        gui_hooks.add_cards_might_add_note(optional_problems, note)
+        if not all(askUser(op) for op in optional_problems):
             return False
 
         return True
@@ -319,12 +343,22 @@ class AddCards(QMainWindow):
         self.close()
 
     def ifCanClose(self, onOk: Callable) -> None:
-        def afterSave() -> None:
-            ok = self.editor.fieldsAreBlank(self._last_added_note) or askUser(
-                tr.adding_close_and_lose_current_input(), defaultno=True
-            )
-            if ok:
+        def callback(choice: int) -> None:
+            if choice == 0:
                 onOk()
+
+        def afterSave() -> None:
+            if self.editor.fieldsAreBlank(self._last_added_note):
+                return onOk()
+
+            ask_user_dialog(
+                tr.adding_discard_current_input(),
+                callback=callback,
+                buttons=[
+                    QMessageBox.StandardButton.Discard,
+                    (tr.adding_keep_editing(), QMessageBox.ButtonRole.RejectRole),
+                ],
+            )
 
         self.editor.call_after_note_saved(afterSave)
 

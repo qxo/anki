@@ -1,77 +1,62 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-// infallible backend methods still return a result
-#![allow(clippy::unnecessary_wraps)]
-
 mod adding;
-mod card;
-mod cardrendering;
+mod ankidroid;
+mod ankiweb;
+mod card_rendering;
 mod collection;
 mod config;
-mod dbproxy;
-mod deckconfig;
-mod decks;
+pub(crate) mod dbproxy;
 mod error;
-mod generic;
 mod i18n;
-mod links;
-mod media;
-mod notes;
-mod notetypes;
+mod import_export;
 mod ops;
-mod progress;
-mod scheduler;
-mod search;
-mod stats;
 mod sync;
-mod tags;
 
-use std::{
-    result,
-    sync::{Arc, Mutex},
-};
+use std::ops::Deref;
+use std::result;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 
+use futures::future::AbortHandle;
 use once_cell::sync::OnceCell;
-use progress::AbortHandleSlot;
 use prost::Message;
-use tokio::runtime::{self, Runtime};
+use reqwest::Client;
+use tokio::runtime;
+use tokio::runtime::Runtime;
 
-use self::{
-    card::CardsService,
-    cardrendering::CardRenderingService,
-    collection::CollectionService,
-    config::ConfigService,
-    deckconfig::DeckConfigService,
-    decks::DecksService,
-    i18n::I18nService,
-    links::LinksService,
-    media::MediaService,
-    notes::NotesService,
-    notetypes::NotetypesService,
-    progress::ProgressState,
-    scheduler::SchedulerService,
-    search::SearchService,
-    stats::StatsService,
-    sync::{SyncService, SyncState},
-    tags::TagsService,
-};
-use crate::{
-    backend::dbproxy::db_command_bytes,
-    backend_proto as pb,
-    collection::Collection,
-    error::{AnkiError, Result},
-    i18n::I18n,
-};
+use crate::backend::dbproxy::db_command_bytes;
+use crate::backend::sync::SyncState;
+use crate::prelude::*;
+use crate::progress::Progress;
+use crate::progress::ProgressState;
+use crate::progress::ThrottlingProgressHandler;
 
-pub struct Backend {
-    col: Arc<Mutex<Option<Collection>>>,
-    tr: I18n,
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct Backend(Arc<BackendInner>);
+
+impl Deref for Backend {
+    type Target = BackendInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct BackendInner {
+    col: Mutex<Option<Collection>>,
+    pub(crate) tr: I18n,
     server: bool,
-    sync_abort: AbortHandleSlot,
+    sync_abort: Mutex<Option<AbortHandle>>,
     progress_state: Arc<Mutex<ProgressState>>,
     runtime: OnceCell<Runtime>,
-    state: Arc<Mutex<BackendState>>,
+    state: Mutex<BackendState>,
+    backup_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    media_sync_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    web_client: OnceCell<Client>,
 }
 
 #[derive(Default)]
@@ -79,11 +64,12 @@ struct BackendState {
     sync: SyncState,
 }
 
-pub fn init_backend(init_msg: &[u8]) -> std::result::Result<Backend, String> {
-    let input: pb::BackendInit = match pb::BackendInit::decode(init_msg) {
-        Ok(req) => req,
-        Err(_) => return Err("couldn't decode init request".into()),
-    };
+pub fn init_backend(init_msg: &[u8]) -> result::Result<Backend, String> {
+    let input: anki_proto::backend::BackendInit =
+        match anki_proto::backend::BackendInit::decode(init_msg) {
+            Ok(req) => req,
+            Err(_) => return Err("couldn't decode init request".into()),
+        };
 
     let tr = I18n::new(&input.preferred_langs);
 
@@ -92,61 +78,28 @@ pub fn init_backend(init_msg: &[u8]) -> std::result::Result<Backend, String> {
 
 impl Backend {
     pub fn new(tr: I18n, server: bool) -> Backend {
-        Backend {
-            col: Arc::new(Mutex::new(None)),
+        Backend(Arc::new(BackendInner {
+            col: Mutex::new(None),
             tr,
             server,
-            sync_abort: Arc::new(Mutex::new(None)),
+            sync_abort: Mutex::new(None),
             progress_state: Arc::new(Mutex::new(ProgressState {
                 want_abort: false,
                 last_progress: None,
             })),
             runtime: OnceCell::new(),
-            state: Arc::new(Mutex::new(BackendState::default())),
-        }
+            state: Mutex::new(BackendState::default()),
+            backup_task: Mutex::new(None),
+            media_sync_task: Mutex::new(None),
+            web_client: OnceCell::new(),
+        }))
     }
 
     pub fn i18n(&self) -> &I18n {
         &self.tr
     }
 
-    pub fn run_method(
-        &self,
-        service: u32,
-        method: u32,
-        input: &[u8],
-    ) -> result::Result<Vec<u8>, Vec<u8>> {
-        pb::ServiceIndex::from_i32(service as i32)
-            .ok_or_else(|| AnkiError::invalid_input("invalid service"))
-            .and_then(|service| match service {
-                pb::ServiceIndex::Scheduler => SchedulerService::run_method(self, method, input),
-                pb::ServiceIndex::Decks => DecksService::run_method(self, method, input),
-                pb::ServiceIndex::Notes => NotesService::run_method(self, method, input),
-                pb::ServiceIndex::Notetypes => NotetypesService::run_method(self, method, input),
-                pb::ServiceIndex::Config => ConfigService::run_method(self, method, input),
-                pb::ServiceIndex::Sync => SyncService::run_method(self, method, input),
-                pb::ServiceIndex::Tags => TagsService::run_method(self, method, input),
-                pb::ServiceIndex::DeckConfig => DeckConfigService::run_method(self, method, input),
-                pb::ServiceIndex::CardRendering => {
-                    CardRenderingService::run_method(self, method, input)
-                }
-                pb::ServiceIndex::Media => MediaService::run_method(self, method, input),
-                pb::ServiceIndex::Stats => StatsService::run_method(self, method, input),
-                pb::ServiceIndex::Search => SearchService::run_method(self, method, input),
-                pb::ServiceIndex::I18n => I18nService::run_method(self, method, input),
-                pb::ServiceIndex::Links => LinksService::run_method(self, method, input),
-                pb::ServiceIndex::Collection => CollectionService::run_method(self, method, input),
-                pb::ServiceIndex::Cards => CardsService::run_method(self, method, input),
-            })
-            .map_err(|err| {
-                let backend_err = err.into_protobuf(&self.tr);
-                let mut bytes = Vec::new();
-                backend_err.encode(&mut bytes).unwrap();
-                bytes
-            })
-    }
-
-    pub fn run_db_command_bytes(&self, input: &[u8]) -> std::result::Result<Vec<u8>, Vec<u8>> {
+    pub fn run_db_command_bytes(&self, input: &[u8]) -> result::Result<Vec<u8>, Vec<u8>> {
         self.db_command(input).map_err(|err| {
             let backend_err = err.into_protobuf(&self.tr);
             let mut bytes = Vec::new();
@@ -158,7 +111,7 @@ impl Backend {
     /// If collection is open, run the provided closure while holding
     /// the mutex.
     /// If collection is not open, return an error.
-    fn with_col<F, T>(&self, func: F) -> Result<T>
+    pub(crate) fn with_col<F, T>(&self, func: F) -> Result<T>
     where
         F: FnOnce(&mut Collection) -> Result<T>,
     {
@@ -184,7 +137,22 @@ impl Backend {
             .clone()
     }
 
+    fn web_client(&self) -> &Client {
+        // currently limited to http1, as nginx doesn't support http2 proxies
+        self.web_client
+            .get_or_init(|| Client::builder().http1_only().build().unwrap())
+    }
+
     fn db_command(&self, input: &[u8]) -> Result<Vec<u8>> {
         self.with_col(|col| db_command_bytes(col, input))
+    }
+
+    /// Useful for operations that function with a closed collection, such as
+    /// a colpkg import. For collection operations, you can use
+    /// [Collection::new_progress_handler] instead.
+    pub(crate) fn new_progress_handler<P: Into<Progress> + Default + Clone>(
+        &self,
+    ) -> ThrottlingProgressHandler<P> {
+        ThrottlingProgressHandler::new(self.progress_state.clone())
     }
 }

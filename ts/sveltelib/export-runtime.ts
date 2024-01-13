@@ -5,7 +5,15 @@
 // If they were to bundle their own runtime, things like bindings and contexts
 // would not work.
 
-import { runtimeLibraries } from "../lib/runtime-require";
-import * as svelteRuntime from "svelte/internal";
+import { registerPackageRaw } from "@tslib/runtime-require";
+import * as svelteRuntime from "svelte";
+// @ts-expect-error hidden from typings
+import * as svelteInternal from "svelte/internal";
+// @ts-expect-error hidden from typings
+import * as svelteDiscloseVersion from "svelte/internal/disclose-version";
+import * as svelteStore from "svelte/store";
 
-runtimeLibraries["svelte/internal"] = svelteRuntime;
+registerPackageRaw("svelte", svelteRuntime);
+registerPackageRaw("svelte/store", svelteStore);
+registerPackageRaw("svelte/internal", svelteInternal);
+registerPackageRaw("svelte/internal/disclose-version", svelteDiscloseVersion);

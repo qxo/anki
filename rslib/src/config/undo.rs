@@ -19,7 +19,7 @@ impl Collection {
                 let current = self
                     .storage
                     .get_config_entry(&entry.key)?
-                    .ok_or_else(|| AnkiError::invalid_input("config disappeared"))?;
+                    .or_invalid("config disappeared")?;
                 self.update_config_entry_undoable(entry, current)
                     .map(|_| ())
             }
@@ -71,11 +71,10 @@ impl Collection {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::collection::open_test_collection;
 
     #[test]
     fn undo() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         // the op kind doesn't matter, we just need undo enabled
         let op = Op::Bury;
         // test key

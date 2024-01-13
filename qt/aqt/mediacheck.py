@@ -9,10 +9,14 @@ from concurrent.futures import Future
 from typing import Iterable, Sequence, TypeVar
 
 import aqt
+import aqt.progress
 from anki.collection import Collection, SearchNode
 from anki.errors import Interrupted
 from anki.media import CheckMediaResponse
+from anki.notes import NoteId
+from aqt import gui_hooks
 from aqt.operations import QueryOp
+from aqt.operations.tag import add_tags_to_notes
 from aqt.qt import *
 from aqt.utils import (
     askUser,
@@ -56,6 +60,7 @@ class MediaChecker:
     def _set_progress_enabled(self, enabled: bool) -> None:
         if self._progress_timer:
             self._progress_timer.stop()
+            self._progress_timer.deleteLater()
             self._progress_timer = None
         if enabled:
             self._progress_timer = timer = QTimer()
@@ -95,6 +100,7 @@ class MediaChecker:
             return
 
         output: CheckMediaResponse = future.result()
+        gui_hooks.media_check_did_finish(output)
         report = output.report
 
         # show report and offer to delete
@@ -118,6 +124,14 @@ class MediaChecker:
             qconnect(b.clicked, lambda c: self._on_trash_files(output.unused))
 
         if output.missing:
+            b = QPushButton(tr.media_check_add_tag())
+            b.setAutoDefault(False)
+            box.addButton(b, QDialogButtonBox.ButtonRole.RejectRole)
+            qconnect(
+                b.clicked,
+                lambda: add_missing_media_tag(self.mw, output.missing_media_notes),
+            )
+
             if any(map(lambda x: x.startswith("latex-"), output.missing)):
                 b = QPushButton(tr.media_check_render_latex())
                 b.setAutoDefault(False)
@@ -138,7 +152,7 @@ class MediaChecker:
         qconnect(box.rejected, diag.reject)
         diag.setMinimumHeight(400)
         diag.setMinimumWidth(500)
-        restoreGeom(diag, "checkmediadb")
+        restoreGeom(diag, "checkmediadb", default_size=(800, 800))
         diag.exec()
         saveGeom(diag, "checkmediadb")
 
@@ -230,3 +244,11 @@ class MediaChecker:
             tooltip(tr.media_check_trash_restored())
 
         self.mw.taskman.run_in_background(restore_trash, on_done)
+
+
+def add_missing_media_tag(parent: QWidget, missing_media_notes: Sequence[int]) -> None:
+    add_tags_to_notes(
+        parent=parent,
+        note_ids=list(map(NoteId, missing_media_notes)),
+        space_separated_tags=tr.media_check_missing_media_tag(),
+    ).run_in_background()

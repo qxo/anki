@@ -3,69 +3,99 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { onMount, createEventDispatcher } from "svelte";
-    import { pageTheme } from "../sveltelib/theme";
-
     export let id: string | undefined = undefined;
+    export let role: string | undefined = undefined;
+    export let selected = false;
     let className = "";
     export { className as class };
 
+    export let buttonRef: HTMLButtonElement | undefined = undefined;
+
     export let tooltip: string | undefined = undefined;
-    export let tabbable: boolean = false;
 
-    let buttonRef: HTMLButtonElement;
+    export let active = false;
+    export let disabled = false;
 
-    const dispatch = createEventDispatcher();
-    onMount(() => dispatch("mount", { button: buttonRef }));
+    const rtl: boolean = window.getComputedStyle(document.body).direction == "rtl";
+
+    $: if (buttonRef && active) {
+        buttonRef!.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+        });
+    }
+
+    export let tabbable = false;
 </script>
 
 <button
-    {id}
-    tabindex={tabbable ? 0 : -1}
     bind:this={buttonRef}
-    class="dropdown-item btn {className}"
-    class:btn-day={!$pageTheme.isDark}
-    class:btn-night={$pageTheme.isDark}
+    {id}
+    {role}
+    aria-selected={selected}
+    tabindex={tabbable ? 0 : -1}
+    class="dropdown-item {className}"
+    class:active
+    class:rtl
     title={tooltip}
-    on:click
+    {disabled}
     on:mouseenter
     on:focus
     on:keydown
+    on:click
     on:mousedown|preventDefault
 >
     <slot />
 </button>
 
 <style lang="scss">
-    @use "sass/button-mixins" as button;
-
     button {
         display: flex;
-        justify-content: space-between;
-
-        font-size: calc(var(--base-font-size) * 0.8);
+        justify-content: start;
+        width: 100%;
+        padding: 0.25rem 1rem;
+        white-space: nowrap;
+        font-size: var(--dropdown-font-size, small);
 
         background: none;
         box-shadow: none !important;
         border: none;
+        border-radius: 0;
+        color: var(--fg);
 
-        &:active,
-        &.active {
-            background-color: button.$focus-color;
-            color: white;
+        &:hover {
+            border: none;
         }
-    }
 
-    .btn-day {
-        color: black;
-    }
+        &:hover:not([disabled]) {
+            background: var(--highlight-bg);
+            color: var(--highlight-fg);
+        }
 
-    .btn-night {
-        color: white;
+        &.focus {
+            // TODO this is subtly different from hovering with the mouse for some reason
+            @extend button, :hover;
+        }
 
-        &:hover,
-        &:focus {
-            @include button.btn-night-base;
+        &[disabled] {
+            cursor: default;
+            color: var(--fg-disabled);
+        }
+
+        /* selection highlight */
+        &:not(.rtl) {
+            border-left: 3px solid transparent;
+        }
+        &.rtl {
+            border-right: 3px solid transparent;
+        }
+        &.active {
+            &:not(.rtl) {
+                border-left-color: var(--border-focus);
+            }
+            &.rtl {
+                border-right-color: var(--border-focus);
+            }
         }
     }
 </style>

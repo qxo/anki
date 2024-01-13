@@ -5,30 +5,28 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import { Stats } from "../lib/proto";
+import type { GraphsResponse } from "@tslib/anki/stats_pb";
+import type { GraphsResponse_Hours_Hour } from "@tslib/anki/stats_pb";
+import * as tr from "@tslib/ftl";
+import { localizedNumber } from "@tslib/i18n";
 import {
-    interpolateBlues,
-    select,
-    pointer,
-    scaleLinear,
-    scaleBand,
-    scaleSequential,
+    area,
     axisBottom,
     axisLeft,
     axisRight,
-    area,
     curveBasis,
+    interpolateBlues,
+    pointer,
+    scaleBand,
+    scaleLinear,
+    scaleSequential,
+    select,
 } from "d3";
-import { localizedNumber } from "../lib/i18n";
-import * as tr from "../lib/ftl";
-import { showTooltip, hideTooltip } from "./tooltip";
-import {
-    GraphBounds,
-    setDataAvailable,
-    GraphRange,
-    millisecondCutoffForRange,
-} from "./graph-helpers";
+
+import type { GraphBounds } from "./graph-helpers";
+import { GraphRange, setDataAvailable } from "./graph-helpers";
 import { oddTickClass } from "./graph-styles";
+import { hideTooltip, showTooltip } from "./tooltip";
 
 interface Hour {
     hour: number;
@@ -36,44 +34,28 @@ interface Hour {
     correctCount: number;
 }
 
-const ReviewKind = Stats.RevlogEntry.ReviewKind;
-
-function gatherData(data: Stats.GraphsResponse, range: GraphRange): Hour[] {
-    const hours = [...Array(24)].map((_n, idx: number) => {
-        return { hour: idx, totalCount: 0, correctCount: 0 } as Hour;
-    });
-    const cutoff = millisecondCutoffForRange(range, data.nextDayAtSecs);
-
-    for (const review of data.revlog as Stats.RevlogEntry[]) {
-        switch (review.reviewKind) {
-            case ReviewKind.LEARNING:
-            case ReviewKind.REVIEW:
-            case ReviewKind.RELEARNING:
-                break; // from switch
-            case ReviewKind.FILTERED:
-            case ReviewKind.MANUAL:
-                continue; // next loop iteration
-        }
-        if (cutoff && (review.id as number) < cutoff) {
-            continue;
-        }
-
-        const hour = Math.floor(
-            (((review.id as number) / 1000 + data.localOffsetSecs) / 3600) % 24,
-        );
-        hours[hour].totalCount += 1;
-        if (review.buttonChosen != 1) {
-            hours[hour].correctCount += 1;
-        }
+function gatherData(data: GraphsResponse, range: GraphRange): Hour[] {
+    function convert(hours: GraphsResponse_Hours_Hour[]): Hour[] {
+        return hours.map((e, idx) => {
+            return { hour: idx, totalCount: e.total!, correctCount: e.correct! };
+        });
     }
-
-    return hours;
+    switch (range) {
+        case GraphRange.Month:
+            return convert(data.hours!.oneMonth);
+        case GraphRange.ThreeMonths:
+            return convert(data.hours!.threeMonths);
+        case GraphRange.Year:
+            return convert(data.hours!.oneYear);
+        case GraphRange.AllTime:
+            return convert(data.hours!.allTime);
+    }
 }
 
 export function renderHours(
     svgElem: SVGElement,
     bounds: GraphBounds,
-    origData: Stats.GraphsResponse,
+    origData: GraphsResponse,
     range: GraphRange,
 ): void {
     const data = gatherData(origData, range);
@@ -95,9 +77,7 @@ export function renderHours(
         .range([bounds.marginLeft, bounds.width - bounds.marginRight])
         .paddingInner(0.1);
     svg.select<SVGGElement>(".x-ticks")
-        .call((selection) =>
-            selection.transition(trans).call(axisBottom(x).tickSizeOuter(0)),
-        )
+        .call((selection) => selection.transition(trans).call(axisBottom(x).tickSizeOuter(0)))
         .selectAll(".tick")
         .selectAll("text")
         .classed(oddTickClass, (d: any): boolean => d % 2 != 0)
@@ -123,7 +103,7 @@ export function renderHours(
                     .ticks(bounds.height / 50)
                     .tickSizeOuter(0)
                     .tickFormat(yTickFormat as any),
-            ),
+            )
         )
         .attr("direction", "ltr");
 
@@ -155,10 +135,7 @@ export function renderHours(
                     // .attr("opacity", 0.7)
                     .call(updateBar),
             (update) => update.call(updateBar),
-            (remove) =>
-                remove.call((remove) =>
-                    remove.transition(trans).attr("height", 0).attr("y", y(0)!),
-                ),
+            (remove) => remove.call((remove) => remove.transition(trans).attr("height", 0).attr("y", y(0)!)),
         );
 
     svg.select<SVGGElement>(".y2-ticks")
@@ -168,7 +145,7 @@ export function renderHours(
                     .ticks(bounds.height / 50)
                     .tickFormat((n: any) => `${Math.round(n * 100)}%`)
                     .tickSizeOuter(0),
-            ),
+            )
         )
         .attr("direction", "ltr");
 
@@ -194,12 +171,12 @@ export function renderHours(
             hourStart: d.hour,
             hourEnd: d.hour + 1,
         });
-        const correct = tr.statisticsHoursCorrect({
-            correct: d.correctCount,
-            total: d.totalCount,
+        const reviews = tr.statisticsHoursReviews({ reviews: d.totalCount });
+        const correct = tr.statisticsHoursCorrectReviews({
             percent: d.totalCount ? (d.correctCount / d.totalCount) * 100 : 0,
+            reviews: d.correctCount,
         });
-        return `${hour}<br>${correct}`;
+        return `${hour}<br>${reviews}<br>${correct}`;
     }
 
     // hover/tooltip

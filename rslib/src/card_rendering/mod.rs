@@ -3,9 +3,11 @@
 
 use std::collections::HashMap;
 
-use crate::{backend_proto as pb, prelude::*};
+use crate::prelude::*;
 
 mod parser;
+pub(crate) mod service;
+pub mod tts;
 mod writer;
 
 pub fn strip_av_tags<S: Into<String> + AsRef<str>>(txt: S) -> String {
@@ -18,7 +20,7 @@ pub fn extract_av_tags<S: Into<String> + AsRef<str>>(
     txt: S,
     question_side: bool,
     tr: &I18n,
-) -> (String, Vec<pb::AvTag>) {
+) -> (String, Vec<anki_proto::card_rendering::AvTag>) {
     nodes_or_text_only(txt.as_ref())
         .map(|nodes| nodes.write_and_extract_av_tags(question_side, tr))
         .unwrap_or_else(|| (txt.into(), vec![]))
@@ -75,7 +77,7 @@ struct TtsDirective<'a> {
     options: HashMap<&'a str, &'a str>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 struct OtherDirective<'a> {
     name: &'a str,
     content: &'a str,
@@ -92,7 +94,8 @@ pub fn anki_directive_benchmark() {
 mod test {
     use super::*;
 
-    /// Strip av tags and assert equality with input or separately passed output.
+    /// Strip av tags and assert equality with input or separately passed
+    /// output.
     macro_rules! assert_av_stripped {
         ($input:expr) => {
             assert_eq!($input, strip_av_tags($input));
@@ -122,17 +125,21 @@ mod test {
             (
                 "foo [anki:play:q:0] baz [anki:play:q:1]",
                 vec![
-                    pb::AvTag {
-                        value: Some(pb::av_tag::Value::SoundOrVideo("bar.mp3".to_string()))
+                    anki_proto::card_rendering::AvTag {
+                        value: Some(anki_proto::card_rendering::av_tag::Value::SoundOrVideo(
+                            "bar.mp3".to_string()
+                        ))
                     },
-                    pb::AvTag {
-                        value: Some(pb::av_tag::Value::Tts(pb::TtsTag {
-                            field_text: tr.card_templates_blank().to_string(),
-                            lang: "en_US".to_string(),
-                            voices: vec![],
-                            speed: 1.0,
-                            other_args: vec![],
-                        }))
+                    anki_proto::card_rendering::AvTag {
+                        value: Some(anki_proto::card_rendering::av_tag::Value::Tts(
+                            anki_proto::card_rendering::TtsTag {
+                                field_text: tr.card_templates_blank().to_string(),
+                                lang: "en_US".to_string(),
+                                voices: vec![],
+                                speed: 1.0,
+                                other_args: vec![],
+                            }
+                        ))
                     }
                 ],
             ),
@@ -144,7 +151,6 @@ mod test {
                 format!(
                     "[{}]",
                     tr.errors_bad_directive("anki:tts", tr.errors_option_not_set("lang"))
-                        .to_owned()
                 ),
                 vec![],
             ),

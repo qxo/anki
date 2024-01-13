@@ -1,33 +1,47 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+pub(crate) mod data;
 pub(crate) mod filtered;
 
-use std::{collections::HashSet, convert::TryFrom, result};
+use std::collections::HashSet;
+use std::convert::TryFrom;
+use std::fmt;
+use std::result;
 
-use rusqlite::{
-    named_params, params,
-    types::{FromSql, FromSqlError, ValueRef},
-    OptionalExtension, Row,
-};
+use rusqlite::named_params;
+use rusqlite::params;
+use rusqlite::types::FromSql;
+use rusqlite::types::FromSqlError;
+use rusqlite::types::ValueRef;
+use rusqlite::OptionalExtension;
+use rusqlite::Row;
 
+use self::data::CardData;
 use super::ids_to_string;
-use crate::{
-    card::{Card, CardId, CardQueue, CardType},
-    deckconfig::{DeckConfigId, ReviewCardOrder},
-    decks::{Deck, DeckId, DeckKind},
-    error::Result,
-    notes::NoteId,
-    scheduler::{
-        congrats::CongratsInfo,
-        queue::{DueCard, DueCardKind, NewCard},
-    },
-    timestamp::{TimestampMillis, TimestampSecs},
-    types::Usn,
-};
+use crate::card::Card;
+use crate::card::CardId;
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::deckconfig::DeckConfigId;
+use crate::deckconfig::ReviewCardOrder;
+use crate::decks::Deck;
+use crate::decks::DeckId;
+use crate::decks::DeckKind;
+use crate::error::Result;
+use crate::notes::NoteId;
+use crate::scheduler::congrats::CongratsInfo;
+use crate::scheduler::queue::BuryMode;
+use crate::scheduler::queue::DueCard;
+use crate::scheduler::queue::DueCardKind;
+use crate::scheduler::queue::NewCard;
+use crate::scheduler::timing::SchedTimingToday;
+use crate::timestamp::TimestampMillis;
+use crate::timestamp::TimestampSecs;
+use crate::types::Usn;
 
 impl FromSql for CardType {
-    fn column_result(value: ValueRef<'_>) -> std::result::Result<Self, FromSqlError> {
+    fn column_result(value: ValueRef<'_>) -> result::Result<Self, FromSqlError> {
         if let ValueRef::Integer(i) = value {
             Ok(Self::try_from(i as u8).map_err(|_| FromSqlError::InvalidType)?)
         } else {
@@ -37,7 +51,7 @@ impl FromSql for CardType {
 }
 
 impl FromSql for CardQueue {
-    fn column_result(value: ValueRef<'_>) -> std::result::Result<Self, FromSqlError> {
+    fn column_result(value: ValueRef<'_>) -> result::Result<Self, FromSqlError> {
         if let ValueRef::Integer(i) = value {
             Ok(Self::try_from(i as i8).map_err(|_| FromSqlError::InvalidType)?)
         } else {
@@ -47,6 +61,7 @@ impl FromSql for CardQueue {
 }
 
 fn row_to_card(row: &Row) -> result::Result<Card, rusqlite::Error> {
+    let data: CardData = row.get(17)?;
     Ok(Card {
         id: row.get(0)?,
         note_id: row.get(1)?,
@@ -65,7 +80,22 @@ fn row_to_card(row: &Row) -> result::Result<Card, rusqlite::Error> {
         original_due: row.get(14).ok().unwrap_or_default(),
         original_deck_id: row.get(15)?,
         flags: row.get(16)?,
-        data: row.get(17)?,
+        original_position: data.original_position,
+        memory_state: data.memory_state(),
+        desired_retention: data.fsrs_desired_retention,
+        custom_data: data.custom_data,
+    })
+}
+
+fn row_to_new_card(row: &Row) -> result::Result<NewCard, rusqlite::Error> {
+    Ok(NewCard {
+        id: row.get(0)?,
+        note_id: row.get(1)?,
+        template_index: row.get(2)?,
+        mtime: row.get(3)?,
+        current_deck_id: row.get(4)?,
+        original_deck_id: row.get(5)?,
+        hash: 0,
     })
 }
 
@@ -97,7 +127,7 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            card.data,
+            CardData::from_card(card).convert_to_json()?,
             card.id,
         ])?;
         Ok(())
@@ -124,10 +154,38 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            card.data,
+            CardData::from_card(card).convert_to_json()?,
         ])?;
         card.id = CardId(self.db.last_insert_rowid());
         Ok(())
+    }
+
+    /// Add card if id is unique. True if card was added.
+    pub(crate) fn add_card_if_unique(&self, card: &Card) -> Result<bool> {
+        self.db
+            .prepare_cached(include_str!("add_card_if_unique.sql"))?
+            .execute(params![
+                card.id,
+                card.note_id,
+                card.deck_id,
+                card.template_idx,
+                card.mtime,
+                card.usn,
+                card.ctype as u8,
+                card.queue as i8,
+                card.due,
+                card.interval,
+                card.ease_factor,
+                card.reps,
+                card.lapses,
+                card.remaining_steps,
+                card.original_due,
+                card.original_deck_id,
+                card.flags,
+                CardData::from_card(card).convert_to_json()?,
+            ])
+            .map(|n_rows| n_rows == 1)
+            .map_err(Into::into)
     }
 
     /// Add or update card, using the provided ID. Used for syncing & undoing.
@@ -151,7 +209,7 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            card.data,
+            CardData::from_card(card).convert_to_json()?,
         ])?;
 
         Ok(())
@@ -193,15 +251,16 @@ impl super::SqliteStorage {
     /// when it returns false or no more cards found.
     pub(crate) fn for_each_due_card_in_active_decks<F>(
         &self,
-        day_cutoff: u32,
+        timing: SchedTimingToday,
         order: ReviewCardOrder,
         kind: DueCardKind,
+        fsrs: bool,
         mut func: F,
     ) -> Result<()>
     where
-        F: FnMut(DueCard) -> bool,
+        F: FnMut(DueCard) -> Result<bool>,
     {
-        let order_clause = review_order_sql(order);
+        let order_clause = review_order_sql(order, timing, fsrs);
         let mut stmt = self.db.prepare_cached(&format!(
             "{} order by {}",
             include_str!("due_cards.sql"),
@@ -211,7 +270,7 @@ impl super::SqliteStorage {
             DueCardKind::Review => CardQueue::Review,
             DueCardKind::Learning => CardQueue::DayLearn,
         };
-        let mut rows = stmt.query(params![queue as i8, day_cutoff])?;
+        let mut rows = stmt.query(params![queue as i8, timing.days_elapsed])?;
         while let Some(row) = rows.next()? {
             if !func(DueCard {
                 id: row.get(0)?,
@@ -221,7 +280,7 @@ impl super::SqliteStorage {
                 current_deck_id: row.get(5)?,
                 original_deck_id: row.get(6)?,
                 kind,
-            }) {
+            })? {
                 break;
             }
         }
@@ -229,33 +288,50 @@ impl super::SqliteStorage {
         Ok(())
     }
 
-    /// Call func() for each new card, stopping when it returns false
-    /// or no more cards found.
+    /// Call func() for each new card in the provided deck, stopping when it
+    /// returns or no more cards found.
     pub(crate) fn for_each_new_card_in_deck<F>(
         &self,
         deck: DeckId,
-        reverse: bool,
+        sort: NewCardSorting,
         mut func: F,
     ) -> Result<()>
     where
-        F: FnMut(NewCard) -> bool,
+        F: FnMut(NewCard) -> Result<bool>,
     {
         let mut stmt = self.db.prepare_cached(&format!(
             "{} ORDER BY {}",
             include_str!("new_cards.sql"),
-            if reverse { "due desc" } else { "due asc" }
+            sort.write()
         ))?;
         let mut rows = stmt.query(params![deck])?;
         while let Some(row) = rows.next()? {
-            if !func(NewCard {
-                id: row.get(0)?,
-                note_id: row.get(1)?,
-                due: row.get(2)?,
-                template_index: row.get(3)?,
-                mtime: row.get(4)?,
-                original_deck_id: row.get(5)?,
-                hash: 0,
-            }) {
+            if !func(row_to_new_card(row)?)? {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Call func() for each new card in the active decks, stopping when it
+    /// returns false or no more cards found.
+    pub(crate) fn for_each_new_card_in_active_decks<F>(
+        &self,
+        order: NewCardSorting,
+        mut func: F,
+    ) -> Result<()>
+    where
+        F: FnMut(NewCard) -> Result<bool>,
+    {
+        let mut stmt = self.db.prepare_cached(&format!(
+            "{} ORDER BY {}",
+            include_str!("active_new_cards.sql"),
+            order.write(),
+        ))?;
+        let mut rows = stmt.query(params![])?;
+        while let Some(row) = rows.next()? {
+            if !func(row_to_new_card(row)?)? {
                 break;
             }
         }
@@ -287,6 +363,10 @@ impl super::SqliteStorage {
             .db
             .prepare(include_str!("fix_ivl.sql"))?
             .execute(params![mtime, usn])?;
+        other_cnt += self
+            .db
+            .prepare(include_str!("fix_mod.sql"))?
+            .execute(params![])?;
         other_cnt += self
             .db
             .prepare(include_str!("fix_ordinal.sql"))?
@@ -342,7 +422,7 @@ impl super::SqliteStorage {
             .map_err(Into::into)
     }
 
-    pub(crate) fn all_cards_of_note(&self, nid: NoteId) -> Result<Vec<Card>> {
+    pub fn all_cards_of_note(&self, nid: NoteId) -> Result<Vec<Card>> {
         self.db
             .prepare_cached(concat!(include_str!("get_card.sql"), " where nid = ?"))?
             .query_and_then([nid], |r| row_to_card(r).map_err(Into::into))?
@@ -354,23 +434,35 @@ impl super::SqliteStorage {
         note_ids: &[NoteId],
         ordinal: usize,
     ) -> Result<Vec<Card>> {
-        self.set_search_table_to_note_ids(note_ids)?;
-        self.db
-            .prepare_cached(concat!(
-                include_str!("get_card.sql"),
-                " where nid in (select nid from search_nids) and ord > ?"
-            ))?
-            .query_and_then([ordinal as i64], |r| row_to_card(r).map_err(Into::into))?
-            .collect()
+        self.with_ids_in_searched_notes_table(note_ids, || {
+            self.db
+                .prepare_cached(concat!(
+                    include_str!("get_card.sql"),
+                    " where nid in (select nid from search_nids) and ord > ?"
+                ))?
+                .query_and_then([ordinal as i64], |r| row_to_card(r).map_err(Into::into))?
+                .collect()
+        })
     }
 
-    pub(crate) fn all_card_ids_of_note_in_template_order(
-        &self,
-        nid: NoteId,
-    ) -> Result<Vec<CardId>> {
+    pub fn all_card_ids_of_note_in_template_order(&self, nid: NoteId) -> Result<Vec<CardId>> {
         self.db
             .prepare_cached("select id from cards where nid = ? order by ord")?
             .query_and_then([nid], |r| Ok(CardId(r.get(0)?)))?
+            .collect()
+    }
+
+    pub(crate) fn get_all_card_ids(&self) -> Result<HashSet<CardId>> {
+        self.db
+            .prepare("SELECT id FROM cards")?
+            .query_and_then([], |row| Ok(row.get(0)?))?
+            .collect()
+    }
+
+    pub(crate) fn all_cards_as_nid_and_ord(&self) -> Result<HashSet<(NoteId, u16)>> {
+        self.db
+            .prepare("SELECT nid, ord FROM cards")?
+            .query_and_then([], |r| Ok((NoteId(r.get(0)?), r.get(1)?)))?
             .collect()
     }
 
@@ -387,28 +479,43 @@ impl super::SqliteStorage {
         Ok(cids)
     }
 
-    /// Place matching card ids into the search table.
-    pub(crate) fn search_siblings_for_bury(
+    pub(crate) fn all_siblings_for_bury(
         &self,
         cid: CardId,
         nid: NoteId,
-        include_new: bool,
-        include_reviews: bool,
-    ) -> Result<()> {
-        self.setup_searched_cards_table()?;
+        bury_mode: BuryMode,
+    ) -> Result<Vec<Card>> {
         let params = named_params! {
             ":card_id": cid,
             ":note_id": nid,
-            ":include_new": include_new,
-            ":include_reviews": include_reviews,
+            ":include_new": bury_mode.bury_new,
+            ":include_reviews": bury_mode.bury_reviews,
+            ":include_day_learn": bury_mode.bury_interday_learning      ,
             ":new_queue": CardQueue::New as i8,
             ":review_queue": CardQueue::Review as i8,
             ":daylearn_queue": CardQueue::DayLearn as i8,
         };
-        self.db
-            .prepare_cached(include_str!("siblings_for_bury.sql"))?
-            .execute(params)?;
-        Ok(())
+        self.with_searched_cards_table(false, || {
+            self.db
+                .prepare_cached(include_str!("siblings_for_bury.sql"))?
+                .execute(params)?;
+            self.all_searched_cards()
+        })
+    }
+
+    pub(crate) fn with_searched_cards_table<T>(
+        &self,
+        preserve_order: bool,
+        func: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        if preserve_order {
+            self.setup_searched_cards_table_to_preserve_order()?;
+        } else {
+            self.setup_searched_cards_table()?;
+        }
+        let result = func();
+        self.clear_searched_cards_table()?;
+        result
     }
 
     pub(crate) fn note_ids_of_cards(&self, cids: &[CardId]) -> Result<HashSet<NoteId>> {
@@ -425,6 +532,15 @@ impl super::SqliteStorage {
             }
         }
         Ok(nids)
+    }
+
+    /// Place the ids of cards with notes in 'search_nids' into 'search_cids'.
+    /// Returns number of added cards.
+    pub(crate) fn search_cards_of_notes_into_table(&self) -> Result<usize> {
+        self.db
+            .prepare(include_str!("search_cards_of_notes_into_table.sql"))?
+            .execute([])
+            .map_err(Into::into)
     }
 
     pub(crate) fn all_searched_cards(&self) -> Result<Vec<Card>> {
@@ -466,8 +582,8 @@ impl super::SqliteStorage {
     }
 
     pub(crate) fn congrats_info(&self, current: &Deck, today: u32) -> Result<CongratsInfo> {
-        // FIXME: when v1/v2 are dropped, this line will become obsolete, as it's run
-        // on queue build by v3
+        // NOTE: this line is obsolete in v3 as it's run on queue build, but kept to
+        // prevent errors for v1/v2 users before they upgrade
         self.update_active_decks(current)?;
         self.db
             .prepare(include_str!("congrats.sql"))?
@@ -496,12 +612,13 @@ impl super::SqliteStorage {
             .unwrap()
     }
 
-    pub(crate) fn search_cards_at_or_above_position(&self, start: u32) -> Result<()> {
-        self.setup_searched_cards_table()?;
-        self.db
-            .prepare(include_str!("at_or_above_position.sql"))?
-            .execute([start, CardType::New as u32])?;
-        Ok(())
+    pub(crate) fn all_cards_at_or_above_position(&self, start: u32) -> Result<Vec<Card>> {
+        self.with_searched_cards_table(false, || {
+            self.db
+                .prepare(include_str!("at_or_above_position.sql"))?
+                .execute([start, CardType::New as u32])?;
+            self.all_searched_cards()
+        })
     }
 
     pub(crate) fn setup_searched_cards_table(&self) -> Result<()> {
@@ -523,24 +640,13 @@ impl super::SqliteStorage {
 
     /// Injects the provided card IDs into the search_cids table, for
     /// when ids have arrived outside of a search.
-    /// Clear with clear_searched_cards_table().
-    pub(crate) fn set_search_table_to_card_ids(
-        &mut self,
-        cards: &[CardId],
-        preserve_order: bool,
-    ) -> Result<()> {
-        if preserve_order {
-            self.setup_searched_cards_table_to_preserve_order()?;
-        } else {
-            self.setup_searched_cards_table()?;
-        }
+    pub(crate) fn set_search_table_to_card_ids(&self, cards: &[CardId]) -> Result<()> {
         let mut stmt = self
             .db
             .prepare_cached("insert into search_cids values (?)")?;
         for cid in cards {
             stmt.execute([cid])?;
         }
-
         Ok(())
     }
 
@@ -573,6 +679,17 @@ impl super::SqliteStorage {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn get_all_cards(&self) -> Vec<Card> {
+        self.db
+            .prepare("SELECT * FROM cards")
+            .unwrap()
+            .query_and_then([], row_to_card)
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -584,11 +701,22 @@ enum ReviewOrderSubclause {
     IntervalsDescending,
     EaseAscending,
     EaseDescending,
+    /// FSRS
+    DifficultyAscending,
+    /// FSRS
+    DifficultyDescending,
+    RelativeOverdueness {
+        today: u32,
+    },
+    RelativeOverduenessFsrs {
+        timing: SchedTimingToday,
+    },
 }
 
-impl ReviewOrderSubclause {
-    fn to_str(self) -> &'static str {
-        match self {
+impl fmt::Display for ReviewOrderSubclause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let temp_string;
+        let clause = match self {
             ReviewOrderSubclause::Day => "due",
             ReviewOrderSubclause::Deck => "(select rowid from active_decks ad where ad.id = did)",
             ReviewOrderSubclause::Random => "fnvhash(id, mod)",
@@ -596,39 +724,104 @@ impl ReviewOrderSubclause {
             ReviewOrderSubclause::IntervalsDescending => "ivl desc",
             ReviewOrderSubclause::EaseAscending => "factor asc",
             ReviewOrderSubclause::EaseDescending => "factor desc",
-        }
+            ReviewOrderSubclause::DifficultyAscending => "extract_fsrs_variable(data, 'd') asc",
+            ReviewOrderSubclause::DifficultyDescending => "extract_fsrs_variable(data, 'd') desc",
+            ReviewOrderSubclause::RelativeOverdueness { today } => {
+                temp_string = format!("ivl / cast({today}-due+0.001 as real)", today = today);
+                &temp_string
+            }
+            ReviewOrderSubclause::RelativeOverduenessFsrs { timing } => {
+                let today = timing.days_elapsed;
+                let next_day_at = timing.next_day_at.0;
+                temp_string =
+                    format!("extract_fsrs_relative_overdueness(data, due, {today}, ivl, {next_day_at}) desc");
+                &temp_string
+            }
+        };
+        write!(f, "{}", clause)
     }
 }
 
-fn review_order_sql(order: ReviewCardOrder) -> String {
+fn review_order_sql(order: ReviewCardOrder, timing: SchedTimingToday, fsrs: bool) -> String {
     let mut subclauses = match order {
         ReviewCardOrder::Day => vec![ReviewOrderSubclause::Day],
         ReviewCardOrder::DayThenDeck => vec![ReviewOrderSubclause::Day, ReviewOrderSubclause::Deck],
         ReviewCardOrder::DeckThenDay => vec![ReviewOrderSubclause::Deck, ReviewOrderSubclause::Day],
         ReviewCardOrder::IntervalsAscending => vec![ReviewOrderSubclause::IntervalsAscending],
         ReviewCardOrder::IntervalsDescending => vec![ReviewOrderSubclause::IntervalsDescending],
-        ReviewCardOrder::EaseAscending => vec![ReviewOrderSubclause::EaseAscending],
-        ReviewCardOrder::EaseDescending => vec![ReviewOrderSubclause::EaseDescending],
+        ReviewCardOrder::EaseAscending => {
+            vec![if fsrs {
+                ReviewOrderSubclause::DifficultyDescending
+            } else {
+                ReviewOrderSubclause::EaseAscending
+            }]
+        }
+        ReviewCardOrder::EaseDescending => vec![if fsrs {
+            ReviewOrderSubclause::DifficultyAscending
+        } else {
+            ReviewOrderSubclause::EaseDescending
+        }],
+        ReviewCardOrder::RelativeOverdueness => {
+            vec![if fsrs {
+                ReviewOrderSubclause::RelativeOverduenessFsrs { timing }
+            } else {
+                ReviewOrderSubclause::RelativeOverdueness {
+                    today: timing.days_elapsed,
+                }
+            }]
+        }
+        ReviewCardOrder::Random => vec![],
     };
     subclauses.push(ReviewOrderSubclause::Random);
 
     let v: Vec<_> = subclauses
-        .into_iter()
-        .map(ReviewOrderSubclause::to_str)
+        .iter()
+        .map(ReviewOrderSubclause::to_string)
         .collect();
     v.join(", ")
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NewCardSorting {
+    /// Ascending position, consecutive siblings,
+    /// provided they have the same position.
+    LowestPosition,
+    /// Descending position, consecutive siblings,
+    /// provided they have the same position.
+    HighestPosition,
+    /// Random, but with consecutive siblings.
+    /// For some given salt the order is stable.
+    RandomNotes(u32),
+    /// Fully random.
+    /// For some given salt the order is stable.
+    RandomCards(u32),
+}
+
+impl NewCardSorting {
+    fn write(self) -> String {
+        match self {
+            NewCardSorting::LowestPosition => "due ASC, ord ASC".to_string(),
+            NewCardSorting::HighestPosition => "due DESC, ord ASC".to_string(),
+            NewCardSorting::RandomNotes(salt) => format!("fnvhash(nid, {salt}), ord ASC"),
+            NewCardSorting::RandomCards(salt) => format!("fnvhash(id, {salt})"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use std::path::Path;
 
-    use crate::{card::Card, i18n::I18n, storage::SqliteStorage};
+    use anki_i18n::I18n;
+
+    use crate::card::Card;
+    use crate::storage::SqliteStorage;
 
     #[test]
     fn add_card() {
         let tr = I18n::template_only();
-        let storage = SqliteStorage::open_or_create(Path::new(":memory:"), &tr, false).unwrap();
+        let storage =
+            SqliteStorage::open_or_create(Path::new(":memory:"), &tr, false, false).unwrap();
         let mut card = Card::default();
         storage.add_card(&mut card).unwrap();
         let id1 = card.id;

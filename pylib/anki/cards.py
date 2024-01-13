@@ -7,6 +7,10 @@ import pprint
 import time
 
 import anki  # pylint: disable=unused-import
+import anki.collection
+import anki.decks
+import anki.notes
+import anki.template
 from anki import cards_pb2, hooks
 from anki._legacy import DeprecatedNamesMixin, deprecated
 from anki.consts import *
@@ -28,6 +32,7 @@ from anki.sound import AVTag
 # types
 CardId = NewType("CardId", int)
 BackendCard = cards_pb2.Card
+FSRSMemoryState = cards_pb2.FsrsMemoryState
 
 
 class Card(DeprecatedNamesMixin):
@@ -40,6 +45,8 @@ class Card(DeprecatedNamesMixin):
     odid: anki.decks.DeckId
     queue: CardQueue
     type: CardType
+    memory_state: FSRSMemoryState | None
+    desired_retention: float | None
 
     def __init__(
         self,
@@ -85,7 +92,14 @@ class Card(DeprecatedNamesMixin):
         self.odue = card.original_due
         self.odid = anki.decks.DeckId(card.original_deck_id)
         self.flags = card.flags
-        self.data = card.data
+        self.original_position = (
+            card.original_position if card.HasField("original_position") else None
+        )
+        self.custom_data = card.custom_data
+        self.memory_state = card.memory_state if card.HasField("memory_state") else None
+        self.desired_retention = (
+            card.desired_retention if card.HasField("desired_retention") else None
+        )
 
     def _to_backend_card(self) -> cards_pb2.Card:
         # mtime & usn are set by backend
@@ -105,9 +119,13 @@ class Card(DeprecatedNamesMixin):
             original_due=self.odue,
             original_deck_id=self.odid,
             flags=self.flags,
-            data=self.data,
+            original_position=self.original_position,
+            custom_data=self.custom_data,
+            memory_state=self.memory_state,
+            desired_retention=self.desired_retention,
         )
 
+    @deprecated(info="please use col.update_card()")
     def flush(self) -> None:
         hooks.card_will_flush(self)
         if self.id != 0:
@@ -182,10 +200,13 @@ class Card(DeprecatedNamesMixin):
             "autoplay"
         ]
 
-    def time_taken(self) -> int:
-        "Time taken to answer card, in integer MS."
+    def time_taken(self, capped: bool = True) -> int:
+        """Time taken since card timer started, in integer MS.
+        If `capped` is true, returned time is limited to deck preset setting."""
         total = int((time.time() - self.timer_started) * 1000)
-        return min(total, self.time_limit())
+        if capped:
+            total = min(total, self.time_limit())
+        return total
 
     def description(self) -> str:
         dict_copy = dict(self.__dict__)
@@ -193,7 +214,7 @@ class Card(DeprecatedNamesMixin):
         del dict_copy["_note"]
         del dict_copy["_render_output"]
         del dict_copy["col"]
-        del dict_copy["timerStarted"]
+        del dict_copy["timer_started"]
         return f"{super().__repr__()} {pprint.pformat(dict_copy, width=300)}"
 
     def user_flag(self) -> int:

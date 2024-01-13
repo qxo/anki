@@ -3,43 +3,50 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import type { GraphsResponse } from "@tslib/anki/stats_pb";
+    import * as tr from "@tslib/ftl";
     import { createEventDispatcher } from "svelte";
-    import type { Stats } from "../lib/proto";
-    import type { PreferenceStore } from "../sveltelib/preferences";
-    import * as tr from "../lib/ftl";
 
+    import AxisTicks from "./AxisTicks.svelte";
+    import type { GraphData } from "./calendar";
+    import { gatherData, renderCalendar } from "./calendar";
     import Graph from "./Graph.svelte";
+    import type { GraphPrefs, SearchEventMap } from "./graph-helpers";
+    import { defaultGraphBounds, RevlogRange } from "./graph-helpers";
     import InputBox from "./InputBox.svelte";
     import NoDataOverlay from "./NoDataOverlay.svelte";
-    import AxisTicks from "./AxisTicks.svelte";
 
-    import { defaultGraphBounds, RevlogRange } from "./graph-helpers";
-    import type { SearchEventMap } from "./graph-helpers";
-    import { gatherData, renderCalendar } from "./calendar";
-    import type { GraphData } from "./calendar";
-
-    export let sourceData: Stats.GraphsResponse;
-    export let preferences: PreferenceStore<Stats.GraphPreferences>;
+    export let sourceData: GraphsResponse;
+    export let prefs: GraphPrefs;
     export let revlogRange: RevlogRange;
     export let nightMode: boolean;
 
-    let { calendarFirstDayOfWeek } = preferences;
     const dispatch = createEventDispatcher<SearchEventMap>();
 
     let graphData: GraphData | null = null;
 
-    let bounds = defaultGraphBounds();
+    const bounds = defaultGraphBounds();
     bounds.height = 120;
     bounds.marginLeft = 20;
     bounds.marginRight = 20;
 
     let svg = null as HTMLElement | SVGElement | null;
-    let maxYear = new Date().getFullYear();
+    const maxYear = new Date().getFullYear();
     let minYear = 0;
     let targetYear = maxYear;
 
     $: if (sourceData) {
-        graphData = gatherData(sourceData, $calendarFirstDayOfWeek);
+        graphData = gatherData(sourceData, $prefs.calendarFirstDayOfWeek as number);
+        renderCalendar(
+            svg as SVGElement,
+            bounds,
+            graphData,
+            dispatch,
+            targetYear,
+            nightMode,
+            revlogRange,
+            (day) => ($prefs.calendarFirstDayOfWeek = day),
+        );
     }
 
     $: {
@@ -53,19 +60,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         if (targetYear < minYear) {
             targetYear = minYear;
         }
-    }
-
-    $: if (graphData) {
-        renderCalendar(
-            svg as SVGElement,
-            bounds,
-            graphData,
-            dispatch,
-            targetYear,
-            nightMode,
-            revlogRange,
-            calendarFirstDayOfWeek.set,
-        );
     }
 
     const title = tr.statisticsCalendarTitle();

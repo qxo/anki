@@ -3,16 +3,20 @@
 
 use anki_i18n::I18n;
 use reqwest::StatusCode;
+use snafu::Snafu;
 
 use super::AnkiError;
+use crate::sync::collection::sanity::SanityCheckCounts;
+use crate::sync::error::HttpError;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub struct NetworkError {
     pub info: String,
     pub kind: NetworkErrorKind,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NetworkErrorKind {
     Offline,
     Timeout,
@@ -20,13 +24,14 @@ pub enum NetworkErrorKind {
     Other,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("{kind:?}: {info}"))]
 pub struct SyncError {
     pub info: String,
     pub kind: SyncErrorKind,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyncErrorKind {
     Conflict,
     ServerError,
@@ -39,14 +44,20 @@ pub enum SyncErrorKind {
     DatabaseCheckRequired,
     SyncNotStarted,
     UploadTooLarge,
+    SanityCheckFailed {
+        client: Option<SanityCheckCounts>,
+        server: Option<SanityCheckCounts>,
+    },
 }
 
 impl AnkiError {
     pub(crate) fn sync_error(info: impl Into<String>, kind: SyncErrorKind) -> Self {
-        AnkiError::SyncError(SyncError {
-            info: info.into(),
-            kind,
-        })
+        AnkiError::SyncError {
+            source: SyncError {
+                info: info.into(),
+                kind,
+            },
+        }
     }
 
     pub(crate) fn server_message<S: Into<String>>(msg: S) -> AnkiError {
@@ -54,18 +65,20 @@ impl AnkiError {
     }
 }
 
-impl From<reqwest::Error> for AnkiError {
-    fn from(err: reqwest::Error) -> Self {
+impl From<&reqwest::Error> for AnkiError {
+    fn from(err: &reqwest::Error) -> Self {
         let url = err.url().map(|url| url.as_str()).unwrap_or("");
         let str_err = format!("{}", err);
         // strip url from error to avoid exposing keys
         let info = str_err.replace(url, "");
 
         if err.is_timeout() {
-            AnkiError::NetworkError(NetworkError {
-                info,
-                kind: NetworkErrorKind::Timeout,
-            })
+            AnkiError::NetworkError {
+                source: NetworkError {
+                    info,
+                    kind: NetworkErrorKind::Timeout,
+                },
+            }
         } else if err.is_status() {
             error_for_status_code(info, err.status().unwrap())
         } else {
@@ -74,39 +87,59 @@ impl From<reqwest::Error> for AnkiError {
     }
 }
 
+impl From<reqwest::Error> for AnkiError {
+    fn from(err: reqwest::Error) -> Self {
+        (&err).into()
+    }
+}
+
 fn error_for_status_code(info: String, code: StatusCode) -> AnkiError {
     use reqwest::StatusCode as S;
     match code {
-        S::PROXY_AUTHENTICATION_REQUIRED => AnkiError::NetworkError(NetworkError {
-            info,
-            kind: NetworkErrorKind::ProxyAuth,
-        }),
-        S::CONFLICT => AnkiError::SyncError(SyncError {
-            info,
-            kind: SyncErrorKind::Conflict,
-        }),
-        S::FORBIDDEN => AnkiError::SyncError(SyncError {
-            info,
-            kind: SyncErrorKind::AuthFailed,
-        }),
-        S::NOT_IMPLEMENTED => AnkiError::SyncError(SyncError {
-            info,
-            kind: SyncErrorKind::ClientTooOld,
-        }),
-        S::INTERNAL_SERVER_ERROR | S::BAD_GATEWAY | S::GATEWAY_TIMEOUT | S::SERVICE_UNAVAILABLE => {
-            AnkiError::SyncError(SyncError {
+        S::PROXY_AUTHENTICATION_REQUIRED => AnkiError::NetworkError {
+            source: NetworkError {
                 info,
-                kind: SyncErrorKind::ServerError,
-            })
+                kind: NetworkErrorKind::ProxyAuth,
+            },
+        },
+        S::CONFLICT => AnkiError::SyncError {
+            source: SyncError {
+                info,
+                kind: SyncErrorKind::Conflict,
+            },
+        },
+        S::FORBIDDEN => AnkiError::SyncError {
+            source: SyncError {
+                info,
+                kind: SyncErrorKind::AuthFailed,
+            },
+        },
+        S::NOT_IMPLEMENTED => AnkiError::SyncError {
+            source: SyncError {
+                info,
+                kind: SyncErrorKind::ClientTooOld,
+            },
+        },
+        S::INTERNAL_SERVER_ERROR | S::BAD_GATEWAY | S::GATEWAY_TIMEOUT | S::SERVICE_UNAVAILABLE => {
+            AnkiError::SyncError {
+                source: SyncError {
+                    info,
+                    kind: SyncErrorKind::ServerError,
+                },
+            }
         }
-        S::BAD_REQUEST => AnkiError::SyncError(SyncError {
-            info,
-            kind: SyncErrorKind::DatabaseCheckRequired,
-        }),
-        _ => AnkiError::NetworkError(NetworkError {
-            info,
-            kind: NetworkErrorKind::Other,
-        }),
+        S::BAD_REQUEST => AnkiError::SyncError {
+            source: SyncError {
+                info,
+                kind: SyncErrorKind::DatabaseCheckRequired,
+            },
+        },
+        _ => AnkiError::NetworkError {
+            source: NetworkError {
+                info,
+                kind: NetworkErrorKind::Other,
+            },
+        },
     }
 }
 
@@ -131,7 +164,9 @@ fn guess_reqwest_error(mut info: String) -> AnkiError {
 
         NetworkErrorKind::Other
     };
-    AnkiError::NetworkError(NetworkError { info, kind })
+    AnkiError::NetworkError {
+        source: NetworkError { info, kind },
+    }
 }
 
 impl From<zip::result::ZipError> for AnkiError {
@@ -141,7 +176,7 @@ impl From<zip::result::ZipError> for AnkiError {
 }
 
 impl SyncError {
-    pub fn localized_description(&self, tr: &I18n) -> String {
+    pub fn message(&self, tr: &I18n) -> String {
         match self.kind {
             SyncErrorKind::ServerMessage => self.info.clone().into(),
             SyncErrorKind::Other => self.info.clone().into(),
@@ -151,7 +186,9 @@ impl SyncError {
             SyncErrorKind::AuthFailed => tr.sync_wrong_pass(),
             SyncErrorKind::ResyncRequired => tr.sync_resync_required(),
             SyncErrorKind::ClockIncorrect => tr.sync_clock_off(),
-            SyncErrorKind::DatabaseCheckRequired => tr.sync_sanity_check_failed(),
+            SyncErrorKind::DatabaseCheckRequired | SyncErrorKind::SanityCheckFailed { .. } => {
+                tr.sync_sanity_check_failed()
+            }
             SyncErrorKind::SyncNotStarted => "sync not started".into(),
             SyncErrorKind::UploadTooLarge => tr.sync_upload_too_large(&self.info),
         }
@@ -160,7 +197,7 @@ impl SyncError {
 }
 
 impl NetworkError {
-    pub fn localized_description(&self, tr: &I18n) -> String {
+    pub fn message(&self, tr: &I18n) -> String {
         let summary = match self.kind {
             NetworkErrorKind::Offline => tr.network_offline(),
             NetworkErrorKind::Timeout => tr.network_timeout(),
@@ -169,5 +206,27 @@ impl NetworkError {
         };
         let details = tr.network_details(self.info.as_str());
         format!("{}\n\n{}", summary, details)
+    }
+}
+
+// This needs rethinking; we should be attaching error context as errors are
+// encountered instead of trying to determine the problem later.
+impl From<HttpError> for AnkiError {
+    fn from(err: HttpError) -> Self {
+        if let Some(reqwest_error) = err
+            .source
+            .as_ref()
+            .and_then(|source| source.downcast_ref::<reqwest::Error>())
+        {
+            reqwest_error.into()
+        } else if err.code == StatusCode::REQUEST_TIMEOUT {
+            NetworkError {
+                info: String::new(),
+                kind: NetworkErrorKind::Timeout,
+            }
+            .into()
+        } else {
+            AnkiError::sync_error(format!("{:?}", err), SyncErrorKind::Other)
+        }
     }
 }

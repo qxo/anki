@@ -8,7 +8,7 @@ import pprint
 import re
 import sys
 import time
-from typing import Any, Callable
+from typing import Callable, Sequence
 
 from anki import media_pb2
 from anki._legacy import DeprecatedNamesMixin, deprecated_keywords
@@ -29,67 +29,35 @@ def media_paths_from_col_path(col_path: str) -> tuple[str, str]:
 CheckMediaResponse = media_pb2.CheckMediaResponse
 
 
-# fixme: look into whether we can drop chdir() below
-# - need to check aa89d06304fecd3597da4565330a3e55bdbb91fe
-# - and audio handling code
-
-
 class MediaManager(DeprecatedNamesMixin):
-
     sound_regexps = [r"(?i)(\[sound:(?P<fname>[^]]+)\])"]
     html_media_regexps = [
         # src element quoted case
-        r"(?i)(<[img|audio][^>]* src=(?P<str>[\"'])(?P<fname>[^>]+?)(?P=str)[^>]*>)",
+        r"(?i)(<(?:img|audio)\b[^>]* src=(?P<str>[\"'])(?P<fname>[^>]+?)(?P=str)[^>]*>)",
         # unquoted case
-        r"(?i)(<[img|audio][^>]* src=(?!['\"])(?P<fname>[^ >]+)[^>]*?>)",
+        r"(?i)(<(?:img|audio)\b[^>]* src=(?!['\"])(?P<fname>[^ >]+)[^>]*?>)",
         # src element quoted case
-        r"(?i)(<object[^>]* data=(?P<str>[\"'])(?P<fname>[^>]+?)(?P=str)[^>]*>)",
+        r"(?i)(<object\b[^>]* data=(?P<str>[\"'])(?P<fname>[^>]+?)(?P=str)[^>]*>)",
         # unquoted case
-        r"(?i)(<object[^>]* data=(?!['\"])(?P<fname>[^ >]+)[^>]*?>)",
+        r"(?i)(<object\b[^>]* data=(?!['\"])(?P<fname>[^ >]+)[^>]*?>)",
     ]
     regexps = sound_regexps + html_media_regexps
 
     def __init__(self, col: anki.collection.Collection, server: bool) -> None:
         self.col = col.weakref()
-        self._dir: str | None = None
         if server:
             return
         # media directory
         self._dir = media_paths_from_col_path(self.col.path)[0]
         if not os.path.exists(self._dir):
             os.makedirs(self._dir)
-        try:
-            self._oldcwd = os.getcwd()
-        except OSError:
-            # cwd doesn't exist
-            self._oldcwd = None
-        try:
-            os.chdir(self._dir)
-        except OSError as exc:
-            raise Exception("invalidTempFolder") from exc
 
     def __repr__(self) -> str:
         dict_ = dict(self.__dict__)
         del dict_["col"]
         return f"{super().__repr__()} {pprint.pformat(dict_, width=300)}"
 
-    def connect(self) -> None:
-        if self.col.server:
-            return
-        os.chdir(self._dir)
-
-    def close(self) -> None:
-        if self.col.server:
-            return
-        # change cwd back to old location
-        if self._oldcwd:
-            try:
-                os.chdir(self._oldcwd)
-            except:
-                # may have been deleted
-                pass
-
-    def dir(self) -> str | None:
+    def dir(self) -> str:
         return self._dir
 
     def force_resync(self) -> None:
@@ -133,14 +101,22 @@ class MediaManager(DeprecatedNamesMixin):
         return self.col._backend.add_media_file(desired_name=desired_fname, data=data)
 
     def add_extension_based_on_mime(self, fname: str, content_type: str) -> str:
-        "If jpg or png mime, add .png/.jpg if missing extension."
+        "Add extension based on mime for common audio and image format if missing extension."
         if not os.path.splitext(fname)[1]:
             # mimetypes is returning '.jpe' even after calling .init(), so we'll do
             # it manually instead
             type_map = {
+                "audio/mpeg": ".mp3",
+                "audio/ogg": ".oga",
+                "audio/opus": ".opus",
+                "audio/wav": ".wav",
+                "audio/webm": ".weba",
+                "audio/aac": ".aac",
                 "image/jpeg": ".jpg",
                 "image/png": ".png",
                 "image/svg+xml": ".svg",
+                "image/webp": ".webp",
+                "image/avif": ".avif",
             }
             if content_type in type_map:
                 fname += type_map[content_type]
@@ -173,7 +149,10 @@ class MediaManager(DeprecatedNamesMixin):
                     files.append(fname)
         return files
 
-    def transform_names(self, txt: str, func: Callable) -> Any:
+    def extract_static_media_files(self, mid: NotetypeId) -> Sequence[str]:
+        return self.col._backend.extract_static_media_files(mid)
+
+    def transform_names(self, txt: str, func: Callable) -> str:
         for reg in self.regexps:
             txt = re.sub(reg, func, txt)
         return txt
@@ -200,9 +179,6 @@ class MediaManager(DeprecatedNamesMixin):
 
     def check(self) -> CheckMediaResponse:
         output = self.col._backend.check_media()
-        # files may have been renamed on disk, so an undo at this point could
-        # break file references
-        self.col.save()
         return output
 
     def render_all_latex(
@@ -217,10 +193,9 @@ class MediaManager(DeprecatedNamesMixin):
         """
         last_progress = time.time()
         checked = 0
-        for (nid, mid, flds) in self.col.db.execute(
+        for nid, mid, flds in self.col.db.execute(
             "select id, mid, flds from notes where flds like '%[%'"
         ):
-
             model = self.col.models.get(mid)
             _html, errors = render_latex_returning_errors(
                 flds, model, self.col, expand_clozes=True

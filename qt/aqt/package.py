@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 
 def _fix_pywin32() -> None:
@@ -49,6 +50,28 @@ def _patch_pkgutil() -> None:
     pkgutil.get_data = get_data_custom
 
 
+def _patch_certifi() -> None:
+    """Tell certifi (and thus requests) to use a file in our package folder.
+
+    By default it creates a copy of the data in a temporary folder, which then gets
+    cleaned up by macOS's temp file cleaner."""
+    import certifi
+
+    def where() -> str:
+        prefix = Path(sys.prefix)
+        if sys.platform == "darwin":
+            path = prefix / "../Resources/certifi/cacert.pem"
+        else:
+            path = prefix / "lib" / "certifi" / "cacert.pem"
+        return str(path)
+
+    certifi.where = where
+
+
+def _fix_protobuf_path() -> None:
+    sys.path.append(str(Path(sys.prefix) / "../Resources"))
+
+
 def packaged_build_setup() -> None:
     if not getattr(sys, "frozen", False):
         return
@@ -57,8 +80,11 @@ def packaged_build_setup() -> None:
 
     if sys.platform == "win32":
         _fix_pywin32()
+    elif sys.platform == "darwin":
+        _fix_protobuf_path()
 
     _patch_pkgutil()
+    _patch_certifi()
 
     # escape hatch for debugging issues with packaged build startup
     if os.getenv("ANKI_STARTUP_REPL"):

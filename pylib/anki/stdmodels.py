@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, no_type_check
+from typing import TYPE_CHECKING, Any, Callable
 
 import anki.collection
 import anki.models
@@ -31,13 +31,14 @@ def get_stock_notetypes(
     out: list[
         tuple[str, Callable[[anki.collection.Collection], anki.models.NotetypeDict]]
     ] = []
-    # add standard
+    # add standard - this order should match the one in notetypes.proto
     for kind in [
-        StockNotetypeKind.BASIC,
-        StockNotetypeKind.BASIC_TYPING,
-        StockNotetypeKind.BASIC_AND_REVERSED,
-        StockNotetypeKind.BASIC_OPTIONAL_REVERSED,
-        StockNotetypeKind.CLOZE,
+        StockNotetypeKind.KIND_BASIC,
+        StockNotetypeKind.KIND_BASIC_AND_REVERSED,
+        StockNotetypeKind.KIND_BASIC_OPTIONAL_REVERSED,
+        StockNotetypeKind.KIND_BASIC_TYPING,
+        StockNotetypeKind.KIND_CLOZE,
+        StockNotetypeKind.KIND_IMAGE_OCCLUSION,
     ]:
         note_type = from_json_bytes(col._backend.get_stock_notetype_legacy(kind))
 
@@ -48,7 +49,7 @@ def get_stock_notetypes(
 
         out.append((note_type["name"], instance_getter(note_type)))
     # add extras from add-ons
-    for (name_or_func, func) in models:
+    for name_or_func, func in models:
         if not isinstance(name_or_func, str):
             name = name_or_func()
         else:
@@ -65,7 +66,7 @@ def get_stock_notetypes(
 def _legacy_add_basic_model(
     col: anki.collection.Collection,
 ) -> anki.models.NotetypeDict:
-    note_type = _get_stock_notetype(col, StockNotetypeKind.BASIC)
+    note_type = _get_stock_notetype(col, StockNotetypeKind.KIND_BASIC)
     col.models.add(note_type)
     return note_type
 
@@ -73,7 +74,7 @@ def _legacy_add_basic_model(
 def _legacy_add_basic_typing_model(
     col: anki.collection.Collection,
 ) -> anki.models.NotetypeDict:
-    note_type = _get_stock_notetype(col, StockNotetypeKind.BASIC_TYPING)
+    note_type = _get_stock_notetype(col, StockNotetypeKind.KIND_BASIC_TYPING)
     col.models.add(note_type)
     return note_type
 
@@ -81,7 +82,7 @@ def _legacy_add_basic_typing_model(
 def _legacy_add_forward_reverse(
     col: anki.collection.Collection,
 ) -> anki.models.NotetypeDict:
-    note_type = _get_stock_notetype(col, StockNotetypeKind.BASIC_AND_REVERSED)
+    note_type = _get_stock_notetype(col, StockNotetypeKind.KIND_BASIC_AND_REVERSED)
     col.models.add(note_type)
     return note_type
 
@@ -89,7 +90,7 @@ def _legacy_add_forward_reverse(
 def _legacy_add_forward_optional_reverse(
     col: anki.collection.Collection,
 ) -> anki.models.NotetypeDict:
-    note_type = _get_stock_notetype(col, StockNotetypeKind.BASIC_OPTIONAL_REVERSED)
+    note_type = _get_stock_notetype(col, StockNotetypeKind.KIND_BASIC_OPTIONAL_REVERSED)
     col.models.add(note_type)
     return note_type
 
@@ -97,7 +98,7 @@ def _legacy_add_forward_optional_reverse(
 def _legacy_add_cloze_model(
     col: anki.collection.Collection,
 ) -> anki.models.NotetypeDict:
-    note_type = _get_stock_notetype(col, StockNotetypeKind.CLOZE)
+    note_type = _get_stock_notetype(col, StockNotetypeKind.KIND_CLOZE)
     col.models.add(note_type)
     return note_type
 
@@ -115,6 +116,7 @@ _deprecated_names.register_deprecated_attributes(
 )
 
 
-@no_type_check
-def __getattr__(name: str) -> Any:
-    return _deprecated_names.__getattr__(name)
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        return _deprecated_names.__getattr__(name)

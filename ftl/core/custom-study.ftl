@@ -10,7 +10,6 @@ custom-study-increase-todays-new-card-limit = Increase today's new card limit
 custom-study-increase-todays-new-card-limit-by = Increase today's new card limit by
 custom-study-increase-todays-review-card-limit = Increase today's review card limit
 custom-study-increase-todays-review-limit-by = Increase today's review limit by
-custom-study-new-cards-in-deck-over-today = New cards in deck over today limit: { $val }
 custom-study-new-cards-only = New cards only
 custom-study-no-cards-matched-the-criteria-you = No cards matched the criteria you provided.
 custom-study-ok = OK
@@ -21,8 +20,15 @@ custom-study-review-ahead = Review ahead
 custom-study-review-ahead-by = Review ahead by
 custom-study-review-cards-forgotten-in-last = Review cards forgotten in last
 custom-study-review-forgotten-cards = Review forgotten cards
-custom-study-reviews-due-in-deck-over-today = Reviews due in deck over today limit: { $val }
 custom-study-select = Select
 custom-study-select-tags-to-exclude = Select tags to exclude:
 custom-study-selective-study = Selective Study
 custom-study-study-by-card-state-or-tag = Study by card state or tag
+custom-study-available-new-cards-2 = Available new cards: { $countString }
+custom-study-available-review-cards-2 = Available review cards: { $countString }
+custom-study-available-child-count = ({ $count } in subdecks)
+
+## NO NEED TO TRANSLATE. This text is no longer used by Anki, and will be removed in the future.
+
+custom-study-available-new-cards = Available new cards: { $count }
+custom-study-available-review-cards = Available review cards: { $count }

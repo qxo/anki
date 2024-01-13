@@ -3,12 +3,16 @@
 
 syntax = "proto3";
 
+option java_multiple_files = true;
+
 package anki.decks;
 
 import "anki/generic.proto";
 import "anki/collection.proto";
 
 service DecksService {
+  rpc NewDeck(generic.Empty) returns (Deck);
+  rpc AddDeck(Deck) returns (collection.OpChangesWithId);
   rpc AddDeckLegacy(generic.Json) returns (collection.OpChangesWithId);
   rpc AddOrUpdateDeckLegacy(AddOrUpdateDeckLegacyRequest) returns (DeckId);
   rpc DeckTree(DeckTreeRequest) returns (DeckTreeNode);
@@ -34,6 +38,10 @@ service DecksService {
   rpc SetCurrentDeck(DeckId) returns (collection.OpChanges);
   rpc GetCurrentDeck(generic.Empty) returns (Deck);
 }
+
+// Implicitly includes any of the above methods that are not listed in the
+// backend service.
+service BackendDecksService {}
 
 message DeckId {
   int64 did = 1;
@@ -62,13 +70,21 @@ message Deck {
     bytes other = 255;
   }
   message Normal {
+    message DayLimit {
+      uint32 limit = 1;
+      uint32 today = 2;
+    }
     int64 config_id = 1;
     uint32 extend_new = 2;
     uint32 extend_review = 3;
     string description = 4;
     bool markdown_description = 5;
+    optional uint32 review_limit = 6;
+    optional uint32 new_limit = 7;
+    DayLimit review_limit_today = 8;
+    DayLimit new_limit_today = 9;
 
-    reserved 6 to 11;
+    reserved 12 to 15;
   }
   message Filtered {
     message SearchTerm {
@@ -93,8 +109,14 @@ message Deck {
     repeated SearchTerm search_terms = 2;
     // v1 scheduler only
     repeated float delays = 3;
-    // v2 scheduler only
+    // v2 and old v3 scheduler only
     uint32 preview_delay = 4;
+    // recent v3 scheduler only; 0 means card will be returned
+    uint32 preview_again_secs = 7;
+    // recent v3 scheduler only; 0 means card will be returned
+    uint32 preview_hard_secs = 5;
+    // recent v3 scheduler only; 0 means card will be returned
+    uint32 preview_good_secs = 6;
   }
   // a container to store the deck specifics in the DB
   // as a tagged enum
@@ -126,7 +148,6 @@ message AddOrUpdateDeckLegacyRequest {
 message DeckTreeRequest {
   // if non-zero, counts for the provided timestamp will be included
   int64 now = 1;
-  int64 top_deck_id = 2;
 }
 
 message DeckTreeNode {
@@ -147,6 +168,7 @@ message DeckTreeNode {
   uint32 review_uncapped = 12;
   uint32 total_in_deck = 13;
 
+  // with children, without any limits
   uint32 total_including_children = 14;
 
   bool filtered = 16;
@@ -196,4 +218,5 @@ message FilteredDeckForUpdate {
   int64 id = 1;
   string name = 2;
   Deck.Filtered config = 3;
+  bool allow_empty = 4;
 }

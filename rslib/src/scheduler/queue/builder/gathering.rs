@@ -1,24 +1,147 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{BuryMode, DueCard, NewCard, QueueBuilder};
-use crate::{prelude::*, scheduler::queue::DueCardKind};
+use super::DueCard;
+use super::NewCard;
+use super::QueueBuilder;
+use crate::deckconfig::NewCardGatherPriority;
+use crate::decks::limits::LimitKind;
+use crate::prelude::*;
+use crate::scheduler::queue::DueCardKind;
+use crate::storage::card::NewCardSorting;
 
 impl QueueBuilder {
-    pub(in super::super) fn add_intraday_learning_card(
+    pub(super) fn gather_cards(&mut self, col: &mut Collection) -> Result<()> {
+        self.gather_intraday_learning_cards(col)?;
+        self.gather_due_cards(col, DueCardKind::Learning)?;
+        self.gather_due_cards(col, DueCardKind::Review)?;
+        self.gather_new_cards(col)?;
+
+        Ok(())
+    }
+
+    fn gather_intraday_learning_cards(&mut self, col: &mut Collection) -> Result<()> {
+        col.storage.for_each_intraday_card_in_active_decks(
+            self.context.timing.next_day_at,
+            |card| {
+                self.get_and_update_bury_mode_for_note(card.into());
+                self.learning.push(card);
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn gather_due_cards(&mut self, col: &mut Collection, kind: DueCardKind) -> Result<()> {
+        if self.limits.root_limit_reached(LimitKind::Review) {
+            return Ok(());
+        }
+        col.storage.for_each_due_card_in_active_decks(
+            self.context.timing,
+            self.context.sort_options.review_order,
+            kind,
+            self.context.fsrs,
+            |card| {
+                if self.limits.root_limit_reached(LimitKind::Review) {
+                    return Ok(false);
+                }
+                if !self
+                    .limits
+                    .limit_reached(card.current_deck_id, LimitKind::Review)?
+                    && self.add_due_card(card)
+                {
+                    self.limits.decrement_deck_and_parent_limits(
+                        card.current_deck_id,
+                        LimitKind::Review,
+                    )?;
+                }
+                Ok(true)
+            },
+        )
+    }
+
+    fn gather_new_cards(&mut self, col: &mut Collection) -> Result<()> {
+        match self.context.sort_options.new_gather_priority {
+            NewCardGatherPriority::Deck => {
+                self.gather_new_cards_by_deck(col, NewCardSorting::LowestPosition)
+            }
+            NewCardGatherPriority::DeckThenRandomNotes => self.gather_new_cards_by_deck(
+                col,
+                NewCardSorting::RandomNotes(self.context.timing.days_elapsed),
+            ),
+            NewCardGatherPriority::LowestPosition => {
+                self.gather_new_cards_sorted(col, NewCardSorting::LowestPosition)
+            }
+            NewCardGatherPriority::HighestPosition => {
+                self.gather_new_cards_sorted(col, NewCardSorting::HighestPosition)
+            }
+            NewCardGatherPriority::RandomNotes => self.gather_new_cards_sorted(
+                col,
+                NewCardSorting::RandomNotes(self.context.timing.days_elapsed),
+            ),
+            NewCardGatherPriority::RandomCards => self.gather_new_cards_sorted(
+                col,
+                NewCardSorting::RandomCards(self.context.timing.days_elapsed),
+            ),
+        }
+    }
+
+    fn gather_new_cards_by_deck(
         &mut self,
-        card: DueCard,
-        bury_mode: BuryMode,
-    ) {
-        self.get_and_update_bury_mode_for_note(card.note_id, bury_mode);
-        self.learning.push(card);
+        col: &mut Collection,
+        sort: NewCardSorting,
+    ) -> Result<()> {
+        for deck_id in col.storage.get_active_deck_ids_sorted()? {
+            if self.limits.root_limit_reached(LimitKind::New) {
+                break;
+            }
+            if self.limits.limit_reached(deck_id, LimitKind::New)? {
+                continue;
+            }
+            col.storage
+                .for_each_new_card_in_deck(deck_id, sort, |card| {
+                    let limit_reached = self.limits.limit_reached(deck_id, LimitKind::New)?;
+                    if !limit_reached && self.add_new_card(card) {
+                        self.limits
+                            .decrement_deck_and_parent_limits(deck_id, LimitKind::New)?;
+                    }
+                    Ok(!limit_reached)
+                })?;
+        }
+
+        Ok(())
+    }
+
+    fn gather_new_cards_sorted(
+        &mut self,
+        col: &mut Collection,
+        order: NewCardSorting,
+    ) -> Result<()> {
+        col.storage
+            .for_each_new_card_in_active_decks(order, |card| {
+                if self.limits.root_limit_reached(LimitKind::New) {
+                    return Ok(false);
+                }
+                if !self
+                    .limits
+                    .limit_reached(card.current_deck_id, LimitKind::New)?
+                    && self.add_new_card(card)
+                {
+                    self.limits
+                        .decrement_deck_and_parent_limits(card.current_deck_id, LimitKind::New)?;
+                }
+                Ok(true)
+            })
     }
 
     /// True if limit should be decremented.
-    pub(in super::super) fn add_due_card(&mut self, card: DueCard, bury_mode: BuryMode) -> bool {
+    fn add_due_card(&mut self, card: DueCard) -> bool {
         let bury_this_card = self
-            .get_and_update_bury_mode_for_note(card.note_id, bury_mode)
-            .map(|mode| mode.bury_reviews)
+            .get_and_update_bury_mode_for_note(card.into())
+            .map(|mode| match card.kind {
+                DueCardKind::Review => mode.bury_reviews,
+                DueCardKind::Learning => mode.bury_interday_learning,
+            })
             .unwrap_or_default();
         if bury_this_card {
             false
@@ -33,157 +156,17 @@ impl QueueBuilder {
     }
 
     // True if limit should be decremented.
-    pub(in super::super) fn add_new_card(&mut self, card: NewCard, bury_mode: BuryMode) -> bool {
-        let previous_bury_mode = self
-            .get_and_update_bury_mode_for_note(card.note_id, bury_mode)
-            .map(|mode| mode.bury_new);
+    fn add_new_card(&mut self, card: NewCard) -> bool {
+        let bury_this_card = self
+            .get_and_update_bury_mode_for_note(card.into())
+            .map(|mode| mode.bury_new)
+            .unwrap_or_default();
         // no previous siblings seen?
-        if previous_bury_mode.is_none() {
-            self.new.push(card);
-            return true;
-        }
-        let bury_this_card = previous_bury_mode.unwrap();
-
-        // Cards will be arriving in (due, card_id) order, with all
-        // siblings sharing the same due number by default. In the
-        // common case, card ids will match template order, and nothing
-        // special is required. But if some cards have been generated
-        // after the initial note creation, they will have higher card
-        // ids, and the siblings will thus arrive in the wrong order.
-        // Sorting by ordinal in the DB layer is fairly costly, as it
-        // doesn't allow us to exit early when the daily limits have
-        // been met, so we want to enforce ordering as we add instead.
-        let previous_card_was_sibling_with_higher_ordinal = self
-            .new
-            .last()
-            .map(|previous| {
-                previous.note_id == card.note_id && previous.template_index > card.template_index
-            })
-            .unwrap_or(false);
-
-        if previous_card_was_sibling_with_higher_ordinal {
-            if bury_this_card {
-                // When burying is enabled, we replace the existing sibling
-                // with the lower ordinal one, and skip decrementing the limit.
-                *self.new.last_mut().unwrap() = card;
-
-                false
-            } else {
-                // When burying disabled, we'll want to add this card as well, but we
-                // need to insert it in front of the later-ordinal card(s).
-                let target_idx = self
-                    .new
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .filter_map(|(idx, queued_card)| {
-                        if queued_card.note_id != card.note_id
-                            || queued_card.template_index < card.template_index
-                        {
-                            Some(idx + 1)
-                        } else {
-                            None
-                        }
-                    })
-                    .next()
-                    .unwrap_or(0);
-                self.new.insert(target_idx, card);
-
-                true
-            }
+        if bury_this_card {
+            false
         } else {
-            // card has arrived in expected order - add if burying disabled
-            if bury_this_card {
-                false
-            } else {
-                self.new.push(card);
-
-                true
-            }
+            self.new.push(card);
+            true
         }
-    }
-
-    /// If burying is enabled in `new_settings`, existing entry will be updated.
-    /// Returns a copy made before changing the entry, so that a card with burying
-    /// enabled will bury future siblings, but not itself.
-    fn get_and_update_bury_mode_for_note(
-        &mut self,
-        note_id: NoteId,
-        new_mode: BuryMode,
-    ) -> Option<BuryMode> {
-        let mut previous_mode = None;
-        self.seen_note_ids
-            .entry(note_id)
-            .and_modify(|entry| {
-                previous_mode = Some(*entry);
-                entry.bury_new |= new_mode.bury_new;
-                entry.bury_reviews |= new_mode.bury_reviews;
-            })
-            .or_insert(new_mode);
-
-        previous_mode
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn new_siblings() {
-        let mut builder = QueueBuilder::default();
-        let cards = vec![
-            NewCard {
-                id: CardId(1),
-                note_id: NoteId(1),
-                template_index: 0,
-                ..Default::default()
-            },
-            NewCard {
-                id: CardId(2),
-                note_id: NoteId(2),
-                template_index: 1,
-                ..Default::default()
-            },
-            NewCard {
-                id: CardId(3),
-                note_id: NoteId(2),
-                template_index: 2,
-                ..Default::default()
-            },
-            NewCard {
-                id: CardId(4),
-                note_id: NoteId(2),
-                // lowest ordinal, should be used instead of card 2/3
-                template_index: 0,
-                ..Default::default()
-            },
-        ];
-
-        for card in &cards {
-            builder.add_new_card(
-                card.clone(),
-                BuryMode {
-                    bury_new: true,
-                    ..Default::default()
-                },
-            );
-        }
-
-        assert_eq!(builder.new[0].id, CardId(1));
-        assert_eq!(builder.new[1].id, CardId(4));
-        assert_eq!(builder.new.len(), 2);
-
-        // with burying disabled, we should get all siblings in order
-        let mut builder = QueueBuilder::default();
-
-        for card in &cards {
-            builder.add_new_card(card.clone(), Default::default());
-        }
-
-        assert_eq!(builder.new[0].id, CardId(1));
-        assert_eq!(builder.new[1].id, CardId(4));
-        assert_eq!(builder.new[2].id, CardId(2));
-        assert_eq!(builder.new[3].id, CardId(3));
     }
 }

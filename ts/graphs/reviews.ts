@@ -5,36 +5,35 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import { Stats } from "../lib/proto";
-
-import { timeSpan, dayLabel } from "../lib/time";
+import type { GraphsResponse } from "@tslib/anki/stats_pb";
+import * as tr from "@tslib/ftl";
+import { localizedNumber } from "@tslib/i18n";
+import { dayLabel, timeSpan } from "@tslib/time";
+import type { Bin, ScaleSequential } from "d3";
 import {
-    interpolateGreens,
-    interpolateReds,
-    interpolateOranges,
-    interpolatePurples,
-    select,
-    pointer,
-    scaleLinear,
-    scaleSequential,
+    area,
     axisBottom,
     axisLeft,
     axisRight,
-    area,
-    curveBasis,
-    min,
-    histogram,
-    sum,
-    max,
+    bin,
     cumsum,
-    ScaleSequential,
+    curveBasis,
+    interpolateGreens,
+    interpolateOranges,
+    interpolatePurples,
+    interpolateReds,
+    max,
+    min,
+    pointer,
+    scaleLinear,
+    scaleSequential,
+    select,
+    sum,
 } from "d3";
-import type { Bin } from "d3";
-import { localizedNumber } from "../lib/i18n";
-import * as tr from "../lib/ftl";
-import type { TableDatum } from "./graph-helpers";
-import { GraphBounds, setDataAvailable, GraphRange } from "./graph-helpers";
-import { showTooltip, hideTooltip } from "./tooltip";
+
+import type { GraphBounds, TableDatum } from "./graph-helpers";
+import { GraphRange, numericMap, setDataAvailable } from "./graph-helpers";
+import { hideTooltip, showTooltip } from "./tooltip";
 
 interface Reviews {
     learn: number;
@@ -50,53 +49,10 @@ export interface GraphData {
     reviewTime: Map<number, Reviews>;
 }
 
-const ReviewKind = Stats.RevlogEntry.ReviewKind;
 type BinType = Bin<Map<number, Reviews[]>, number>;
 
-export function gatherData(data: Stats.GraphsResponse): GraphData {
-    const reviewCount = new Map<number, Reviews>();
-    const reviewTime = new Map<number, Reviews>();
-    const empty = { mature: 0, young: 0, learn: 0, relearn: 0, filtered: 0 };
-
-    for (const review of data.revlog as Stats.RevlogEntry[]) {
-        if (review.reviewKind == ReviewKind.MANUAL) {
-            // don't count days with only manual scheduling
-            continue;
-        }
-        const day = Math.ceil(
-            ((review.id as number) / 1000 - data.nextDayAtSecs) / 86400,
-        );
-        const countEntry =
-            reviewCount.get(day) ?? reviewCount.set(day, { ...empty }).get(day)!;
-        const timeEntry =
-            reviewTime.get(day) ?? reviewTime.set(day, { ...empty }).get(day)!;
-
-        switch (review.reviewKind) {
-            case ReviewKind.LEARNING:
-                countEntry.learn += 1;
-                timeEntry.learn += review.takenMillis;
-                break;
-            case ReviewKind.RELEARNING:
-                countEntry.relearn += 1;
-                timeEntry.relearn += review.takenMillis;
-                break;
-            case ReviewKind.REVIEW:
-                if (review.lastInterval < 21) {
-                    countEntry.young += 1;
-                    timeEntry.young += review.takenMillis;
-                } else {
-                    countEntry.mature += 1;
-                    timeEntry.mature += review.takenMillis;
-                }
-                break;
-            case ReviewKind.FILTERED:
-                countEntry.filtered += 1;
-                timeEntry.filtered += review.takenMillis;
-                break;
-        }
-    }
-
-    return { reviewCount, reviewTime };
+export function gatherData(data: GraphsResponse): GraphData {
+    return { reviewCount: numericMap(data.reviews!.count), reviewTime: numericMap(data.reviews!.time) };
 }
 
 enum BinIndex {
@@ -120,7 +76,7 @@ function totalsForBin(bin: BinType): number[] {
     return total;
 }
 
-/// eg idx=0 is mature count, idx=1 is mature+young count, etc
+/** eg idx=0 is mature count, idx=1 is mature+young count, etc */
 function cumulativeBinValue(bin: BinType, idx: number): number {
     return sum(totalsForBin(bin).slice(0, idx + 1));
 }
@@ -158,7 +114,7 @@ export function renderReviews(
     x.domain([x.domain()[0], xMax]);
 
     const sourceMap = showTime ? sourceData.reviewTime : sourceData.reviewCount;
-    const bins = histogram()
+    const bins = bin()
         .value((m) => {
             return m[0];
         })
@@ -176,9 +132,7 @@ export function renderReviews(
 
     x.range([bounds.marginLeft, bounds.width - bounds.marginRight]);
     svg.select<SVGGElement>(".x-ticks")
-        .call((selection) =>
-            selection.transition(trans).call(axisBottom(x).ticks(7).tickSizeOuter(0)),
-        )
+        .call((selection) => selection.transition(trans).call(axisBottom(x).ticks(7).tickSizeOuter(0)))
         .attr("direction", "ltr");
 
     // y scale
@@ -207,7 +161,7 @@ export function renderReviews(
                     .ticks(bounds.height / 50)
                     .tickSizeOuter(0)
                     .tickFormat(yTickFormat as any),
-            ),
+            )
         )
         .attr("direction", "ltr");
 
@@ -220,12 +174,8 @@ export function renderReviews(
 
     const cappedRange = scaleLinear().range([0.3, 0.5]);
     const shiftedRange = scaleLinear().range([0.4, 0.7]);
-    const darkerGreens = scaleSequential((n) =>
-        interpolateGreens(shiftedRange(n)!),
-    ).domain(x.domain() as any);
-    const lighterGreens = scaleSequential((n) =>
-        interpolateGreens(cappedRange(n)!),
-    ).domain(x.domain() as any);
+    const darkerGreens = scaleSequential((n) => interpolateGreens(shiftedRange(n)!)).domain(x.domain() as any);
+    const lighterGreens = scaleSequential((n) => interpolateGreens(cappedRange(n)!)).domain(x.domain() as any);
     const reds = scaleSequential((n) => interpolateReds(cappedRange(n)!)).domain(
         x.domain() as any,
     );
@@ -263,7 +213,7 @@ export function renderReviews(
         const day = dayLabel(d.x0!, d.x1!);
         const totals = totalsForBin(d);
         const dayTotal = valueLabel(sum(totals));
-        let buf = `<table><tr><td>${day}</td><td align=right>${dayTotal}</td></tr>`;
+        let buf = `<table><tr><td>${day}</td><td align=end>${dayTotal}</td></tr>`;
         const lines: [BinIndex | null, string][] = [
             [BinIndex.Filtered, tr.statisticsCountsFilteredCards()],
             [BinIndex.Learn, tr.statisticsCountsLearningCards()],
@@ -273,8 +223,8 @@ export function renderReviews(
             [null, tr.statisticsRunningTotal()],
         ];
         for (const [idx, label] of lines) {
-            let color;
-            let detail;
+            let color: string;
+            let detail: string;
             if (idx == null) {
                 color = "transparent";
                 detail = valueLabel(cumulative);
@@ -284,7 +234,7 @@ export function renderReviews(
             }
             buf += `<tr>
             <td><span style="color: ${color};">■</span> ${label}</td>
-            <td align=right>${detail}</td>
+            <td align=end>${detail}</td>
             </tr>`;
         }
         return buf;
@@ -314,10 +264,7 @@ export function renderReviews(
                         .attr("height", 0)
                         .call((d) => updateBar(d, barNum)),
                 (update) => update.call((d) => updateBar(d, barNum)),
-                (remove) =>
-                    remove.call((remove) =>
-                        remove.transition(trans).attr("height", 0).attr("y", y(0)!),
-                    ),
+                (remove) => remove.call((remove) => remove.transition(trans).attr("height", 0).attr("y", y(0)!)),
             );
     }
 
@@ -337,7 +284,7 @@ export function renderReviews(
                         .ticks(bounds.height / 50)
                         .tickFormat(yTickFormat as any)
                         .tickSizeOuter(0),
-                ),
+                )
             )
             .attr("direction", "ltr");
 
@@ -400,7 +347,7 @@ export function renderReviews(
         averageAnswerTimeLabel = tr.statisticsAverageAnswerTimeLabel();
 
         // need to get total review count to calculate average time
-        const countBins = histogram()
+        const countBins = bin()
             .value((m) => {
                 return m[0];
             })

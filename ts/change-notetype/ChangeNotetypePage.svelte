@@ -3,15 +3,18 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr from "../lib/ftl";
-    import { marked } from "marked";
-    import { ChangeNotetypeState, MapContext } from "./lib";
+    import * as tr from "@tslib/ftl";
+
+    import Col from "../components/Col.svelte";
     import Container from "../components/Container.svelte";
     import Row from "../components/Row.svelte";
-    import Col from "../components/Col.svelte";
+    import StickyContainer from "../components/StickyContainer.svelte";
+    import { renderMarkdown } from "../lib/helpers";
+    import type { ChangeNotetypeState } from "./lib";
+    import { MapContext } from "./lib";
+    import Mapper from "./Mapper.svelte";
     import NotetypeSelector from "./NotetypeSelector.svelte";
     import StickyHeader from "./StickyHeader.svelte";
-    import Mapper from "./Mapper.svelte";
 
     export let state: ChangeNotetypeState;
     $: info = state.info;
@@ -19,24 +22,33 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 </script>
 
 <div bind:offsetHeight={offset}>
-    <NotetypeSelector {state} />
+    <StickyContainer
+        --gutter-block="0.1rem"
+        --gutter-inline="0.25rem"
+        --sticky-borders="0 0 1px"
+        --z-index="4"
+    >
+        <NotetypeSelector {state} />
+    </StickyContainer>
 </div>
 
 <div id="scrollArea" style="--offset: {offset}px; --gutter-inline: 0.25rem;">
     <Row class="gx-0" --cols={2}>
         <Col --col-size={1} breakpoint="md">
             <Container>
-                <StickyHeader {state} ctx={MapContext.Field} />
+                <StickyHeader {state} ctx={MapContext.Field} --z-index="2" />
                 <Mapper {state} ctx={MapContext.Field} />
             </Container>
         </Col>
         <Col --col-size={1} breakpoint="md">
             <Container>
-                <StickyHeader {state} ctx={MapContext.Template} />
+                <StickyHeader {state} ctx={MapContext.Template} --z-index="2" />
                 {#if $info.templates}
                     <Mapper {state} ctx={MapContext.Template} />
                 {:else}
-                    <div>{@html marked(tr.changeNotetypeToFromCloze())}</div>
+                    <div>
+                        {@html renderMarkdown(tr.changeNotetypeToFromCloze())}
+                    </div>
                 {/if}
             </Container>
         </Col>

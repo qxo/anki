@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
-import enum
 import os
 from concurrent.futures import Future
 from typing import Callable
 
 import aqt
+import aqt.main
 from anki.errors import Interrupted, SyncError, SyncErrorKind
 from anki.lang import without_unicode_isolation
 from anki.sync import SyncOutput, SyncStatus
+from anki.sync_pb2 import SyncAuth
 from anki.utils import plat_desc
+from aqt import gui_hooks
 from aqt.qt import (
     QDialog,
     QDialogButtonBox,
@@ -25,19 +27,14 @@ from aqt.qt import (
     qconnect,
 )
 from aqt.utils import (
+    ask_user_dialog,
     askUser,
-    askUserDialog,
     disable_help_button,
     showText,
     showWarning,
+    tooltip,
     tr,
 )
-
-
-class FullSyncChoice(enum.Enum):
-    CANCEL = 0
-    UPLOAD = 1
-    DOWNLOAD = 2
 
 
 def get_sync_status(
@@ -48,16 +45,23 @@ def get_sync_status(
         callback(SyncStatus(required=SyncStatus.NO_CHANGES))  # pylint:disable=no-member
         return
 
-    def on_future_done(fut: Future) -> None:
+    def on_future_done(fut: Future[SyncStatus]) -> None:
         try:
             out = fut.result()
         except Exception as e:
             # swallow errors
             print("sync status check failed:", str(e))
             return
+        if out.new_endpoint:
+            mw.pm.set_current_sync_url(out.new_endpoint)
         callback(out)
 
-    mw.taskman.run_in_background(lambda: mw.col.sync_status(auth), on_future_done)
+    mw.taskman.run_in_background(
+        lambda: mw.col.sync_status(auth),
+        on_future_done,
+        # The check quickly releases the collection, and we don't need to block other callers
+        uses_collection=False,
+    )
 
 
 def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception) -> None:
@@ -98,27 +102,31 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
     qconnect(timer.timeout, on_timer)
     timer.start(150)
 
-    def on_future_done(fut: Future) -> None:
-        mw.col.db.begin()
+    def on_future_done(fut: Future[SyncOutput]) -> None:
+        # scheduler version may have changed
+        mw.col._load_scheduler()
         timer.stop()
         try:
-            out: SyncOutput = fut.result()
+            out = fut.result()
         except Exception as err:
             handle_sync_error(mw, err)
             return on_done()
 
         mw.pm.set_host_number(out.host_number)
+        if out.new_endpoint:
+            mw.pm.set_current_sync_url(out.new_endpoint)
         if out.server_message:
             showText(out.server_message)
         if out.required == out.NO_CHANGES:
-            # all done
+            tooltip(parent=mw, msg=tr.sync_collection_complete())
+            # all done; track media progress
+            mw.media_syncer.start_monitoring()
             return on_done()
         else:
             full_sync(mw, out, on_done)
 
-    mw.col.save(trx=False)
     mw.taskman.with_progress(
-        lambda: mw.col.sync_collection(auth),
+        lambda: mw.col.sync_collection(auth, mw.pm.media_syncing_enabled()),
         on_future_done,
         label=tr.sync_checking(),
         immediate=True,
@@ -128,30 +136,58 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
 def full_sync(
     mw: aqt.main.AnkiQt, out: SyncOutput, on_done: Callable[[], None]
 ) -> None:
+    server_usn = out.server_media_usn if mw.pm.media_syncing_enabled() else None
     if out.required == out.FULL_DOWNLOAD:
-        confirm_full_download(mw, on_done)
+        confirm_full_download(mw, server_usn, on_done)
     elif out.required == out.FULL_UPLOAD:
-        full_upload(mw, on_done)
+        confirm_full_upload(mw, server_usn, on_done)
     else:
-        choice = ask_user_to_decide_direction()
-        if choice == FullSyncChoice.UPLOAD:
-            full_upload(mw, on_done)
-        elif choice == FullSyncChoice.DOWNLOAD:
-            full_download(mw, on_done)
-        else:
-            on_done()
+        button_labels: list[str] = [
+            tr.sync_upload_to_ankiweb(),
+            tr.sync_download_from_ankiweb(),
+            tr.sync_cancel_button(),
+        ]
+
+        def callback(choice: int) -> None:
+            if choice == 0:
+                full_upload(mw, server_usn, on_done)
+            elif choice == 1:
+                full_download(mw, server_usn, on_done)
+            else:
+                on_done()
+
+        ask_user_dialog(
+            tr.sync_conflict_explanation(),
+            callback=callback,
+            buttons=button_labels,
+            default_button=2,
+        )
 
 
-def confirm_full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
+def confirm_full_download(
+    mw: aqt.main.AnkiQt, server_usn: int, on_done: Callable[[], None]
+) -> None:
     # confirmation step required, as some users customize their notetypes
     # in an empty collection, then want to upload them
     if not askUser(tr.sync_confirm_empty_download()):
         return on_done()
     else:
-        mw.closeAllWindows(lambda: full_download(mw, on_done))
+        mw.closeAllWindows(lambda: full_download(mw, server_usn, on_done))
 
 
-def on_full_sync_timer(mw: aqt.main.AnkiQt) -> None:
+def confirm_full_upload(
+    mw: aqt.main.AnkiQt, server_usn: int, on_done: Callable[[], None]
+) -> None:
+    # confirmation step required, as some users have reported an upload
+    # happening despite having their AnkiWeb collection not being empty
+    # (not reproducible - maybe a compiler bug?)
+    if not askUser(tr.sync_confirm_empty_upload()):
+        return on_done()
+    else:
+        mw.closeAllWindows(lambda: full_upload(mw, server_usn, on_done))
+
+
+def on_full_sync_timer(mw: aqt.main.AnkiQt, label: str) -> None:
     progress = mw.col.latest_progress()
     if not progress.HasField("full_sync"):
         return
@@ -159,8 +195,6 @@ def on_full_sync_timer(mw: aqt.main.AnkiQt) -> None:
 
     if sync_progress.transferred == sync_progress.total:
         label = tr.sync_checking()
-    else:
-        label = None
     mw.progress.update(
         value=sync_progress.transferred,
         max=sync_progress.total,
@@ -172,41 +206,55 @@ def on_full_sync_timer(mw: aqt.main.AnkiQt) -> None:
         mw.col.abort_sync()
 
 
-def full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
+def full_download(
+    mw: aqt.main.AnkiQt, server_usn: int, on_done: Callable[[], None]
+) -> None:
+    label = tr.sync_downloading_from_ankiweb()
+
     def on_timer() -> None:
-        on_full_sync_timer(mw)
+        on_full_sync_timer(mw, label)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
     timer.start(150)
 
+    # hook needs to be called early, on the main thread
+    gui_hooks.collection_will_temporarily_close(mw.col)
+
     def download() -> None:
-        mw._close_for_full_download()
-        mw.col.full_download(mw.pm.sync_auth())
+        mw.create_backup_now()
+        mw.col.close_for_full_sync()
+        mw.col.full_upload_or_download(
+            auth=mw.pm.sync_auth(), server_usn=server_usn, upload=False
+        )
 
     def on_future_done(fut: Future) -> None:
         timer.stop()
-        mw.col.reopen(after_full_sync=True)
+        mw.reopen(after_full_sync=True)
         mw.reset()
         try:
             fut.result()
         except Exception as err:
             handle_sync_error(mw, err)
-        mw.media_syncer.start()
+        mw.media_syncer.start_monitoring()
         return on_done()
 
     mw.taskman.with_progress(
         download,
         on_future_done,
-        label=tr.sync_downloading_from_ankiweb(),
     )
 
 
-def full_upload(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
+def full_upload(
+    mw: aqt.main.AnkiQt, server_usn: int | None, on_done: Callable[[], None]
+) -> None:
+    gui_hooks.collection_will_temporarily_close(mw.col)
     mw.col.close_for_full_sync()
 
+    label = tr.sync_uploading_to_ankiweb()
+
     def on_timer() -> None:
-        on_full_sync_timer(mw)
+        on_full_sync_timer(mw, label)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
@@ -214,20 +262,21 @@ def full_upload(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
 
     def on_future_done(fut: Future) -> None:
         timer.stop()
-        mw.col.reopen(after_full_sync=True)
+        mw.reopen(after_full_sync=True)
         mw.reset()
         try:
             fut.result()
         except Exception as err:
             handle_sync_error(mw, err)
             return on_done()
-        mw.media_syncer.start()
+        mw.media_syncer.start_monitoring()
         return on_done()
 
     mw.taskman.with_progress(
-        lambda: mw.col.full_upload(mw.pm.sync_auth()),
+        lambda: mw.col.full_upload_or_download(
+            auth=mw.pm.sync_auth(), server_usn=server_usn, upload=True
+        ),
         on_future_done,
-        label=tr.sync_uploading_to_ankiweb(),
     )
 
 
@@ -244,7 +293,7 @@ def sync_login(
         if username and password:
             break
 
-    def on_future_done(fut: Future) -> None:
+    def on_future_done(fut: Future[SyncAuth]) -> None:
         try:
             auth = fut.result()
         except SyncError as e:
@@ -258,33 +307,17 @@ def sync_login(
             handle_sync_error(mw, err)
             return
 
-        mw.pm.set_host_number(auth.host_number)
         mw.pm.set_sync_key(auth.hkey)
         mw.pm.set_sync_username(username)
 
         on_success()
 
     mw.taskman.with_progress(
-        lambda: mw.col.sync_login(username=username, password=password),
+        lambda: mw.col.sync_login(
+            username=username, password=password, endpoint=mw.pm.sync_endpoint()
+        ),
         on_future_done,
     )
-
-
-def ask_user_to_decide_direction() -> FullSyncChoice:
-    button_labels = [
-        tr.sync_upload_to_ankiweb(),
-        tr.sync_download_from_ankiweb(),
-        tr.sync_cancel_button(),
-    ]
-    diag = askUserDialog(tr.sync_conflict_explanation(), button_labels)
-    diag.setDefault(2)
-    ret = diag.run()
-    if ret == button_labels[0]:
-        return FullSyncChoice.UPLOAD
-    elif ret == button_labels[1]:
-        return FullSyncChoice.DOWNLOAD
-    else:
-        return FullSyncChoice.CANCEL
 
 
 def get_id_and_pass_from_user(

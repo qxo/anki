@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 import platform
 import re
@@ -20,6 +19,8 @@ from typing import Any, Callable, cast
 from markdown import markdown
 
 import aqt
+import aqt.mpv
+import aqt.qt
 from anki import hooks
 from anki.cards import Card
 from anki.sound import AV_REF_RE, AVTag, SoundOrVideoTag
@@ -148,6 +149,14 @@ class AVPlayer:
         self._enqueued = tags[:]
         self._play_next_if_idle()
 
+    def append_tags(self, tags: list[AVTag]) -> None:
+        """Append provided tags to the queue, then start playing them if the current player is idle."""
+        self._enqueued.extend(tags)
+        self._play_next_if_idle()
+
+    def queue_is_empty(self) -> bool:
+        return not bool(self._enqueued)
+
     def stop_and_clear_queue(self) -> None:
         self._enqueued = []
         self._stop_if_playing()
@@ -228,6 +237,7 @@ av_player = AVPlayer()
 # Packaged commands
 ##########################################################################
 
+
 # return modified command array that points to bundled command, and return
 # required environment
 def _packagedCmd(cmd: list[str]) -> tuple[Any, dict[str, str]]:
@@ -237,7 +247,9 @@ def _packagedCmd(cmd: list[str]) -> tuple[Any, dict[str, str]]:
         del env["LD_LIBRARY_PATH"]
 
     if is_win:
-        packaged_path = Path(sys.prefix) / "audio" / (cmd[0] + ".exe")
+        packaged_path = Path(sys.prefix) / (cmd[0] + ".exe")
+    elif is_mac:
+        packaged_path = Path(sys.prefix) / ".." / "Resources" / cmd[0]
     else:
         packaged_path = Path(sys.prefix) / cmd[0]
     if packaged_path.exists():
@@ -251,6 +263,7 @@ def _packagedCmd(cmd: list[str]) -> tuple[Any, dict[str, str]]:
 
 # legacy global for add-ons
 si = startup_info()
+
 
 # osx throws interrupted system call errors frequently
 def retryWait(proc: subprocess.Popen) -> int:
@@ -271,8 +284,9 @@ class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
     args: list[str] = []
     env: dict[str, str] | None = None
 
-    def __init__(self, taskman: TaskManager) -> None:
+    def __init__(self, taskman: TaskManager, media_folder: str | None = None) -> None:
         self._taskman = taskman
+        self._media_folder = media_folder
         self._terminate_flag = False
         self._process: subprocess.Popen | None = None
         self._warned_about_missing_player = False
@@ -280,7 +294,9 @@ class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
     def play(self, tag: AVTag, on_done: OnDoneCallback) -> None:
         self._terminate_flag = False
         self._taskman.run_in_background(
-            lambda: self._play(tag), lambda res: self._on_done(res, on_done)
+            lambda: self._play(tag),
+            lambda res: self._on_done(res, on_done),
+            uses_collection=False,
         )
 
     def stop(self) -> None:
@@ -292,6 +308,7 @@ class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
         self._process = subprocess.Popen(
             self.args + [tag.filename],
             env=self.env,
+            cwd=self._media_folder,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -359,8 +376,10 @@ class SimpleMpvPlayer(SimpleProcessPlayer, VideoPlayer):
         ]
     )
 
-    def __init__(self, taskman: TaskManager, base_folder: str) -> None:
-        super().__init__(taskman)
+    def __init__(
+        self, taskman: TaskManager, base_folder: str, media_folder: str
+    ) -> None:
+        super().__init__(taskman, media_folder)
         self.args += [f"--config-dir={base_folder}"]
 
 
@@ -375,13 +394,13 @@ class SimpleMplayerPlayer(SimpleProcessPlayer, SoundOrVideoPlayer):
 
 
 class MpvManager(MPV, SoundOrVideoPlayer):
-
     if not is_lin:
         default_argv = MPVBase.default_argv + [
             "--input-media-keys=no",
         ]
 
-    def __init__(self, base_path: str) -> None:
+    def __init__(self, base_path: str, media_folder: str) -> None:
+        self.media_folder = media_folder
         mpvPath, self.popenEnv = _packagedCmd(["mpv"])
         self.executable = mpvPath[0]
         self._on_done: OnDoneCallback | None = None
@@ -407,7 +426,7 @@ class MpvManager(MPV, SoundOrVideoPlayer):
         assert isinstance(tag, SoundOrVideoTag)
         self._on_done = on_done
         filename = hooks.media_file_filter(tag.filename)
-        path = os.path.join(os.getcwd(), filename)
+        path = os.path.join(self.media_folder, filename)
 
         self.command("loadfile", path, "replace", "pause=no")
         gui_hooks.av_player_did_begin_playing(self, tag)
@@ -423,7 +442,9 @@ class MpvManager(MPV, SoundOrVideoPlayer):
 
     def on_property_idle_active(self, value: bool) -> None:
         if value and self._on_done:
-            self._on_done()
+            from aqt import mw
+
+            mw.taskman.run_on_main(self._on_done)
 
     def shutdown(self) -> None:
         self.close()
@@ -446,8 +467,9 @@ class MpvManager(MPV, SoundOrVideoPlayer):
 
 
 class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
-    def __init__(self, taskman: TaskManager) -> None:
-        super().__init__(taskman)
+    def __init__(self, taskman: TaskManager, media_folder: str) -> None:
+        self.media_folder = media_folder
+        super().__init__(taskman, media_folder)
         self.args.append("-slave")
 
     def _play(self, tag: AVTag) -> None:
@@ -458,6 +480,7 @@ class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
         self._process = subprocess.Popen(
             self.args + [filename],
             env=self.env,
+            cwd=self.media_folder,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -510,7 +533,9 @@ def encode_mp3(mw: aqt.AnkiQt, src_wav: str, on_done: Callable[[str], None]) -> 
 
         on_done(dst_mp3)
 
-    mw.taskman.run_in_background(lambda: _encode_mp3(src_wav, dst_mp3), _on_done)
+    mw.taskman.run_in_background(
+        lambda: _encode_mp3(src_wav, dst_mp3), _on_done, uses_collection=False
+    )
 
 
 # Recording interface
@@ -604,7 +629,9 @@ class QtAudioInputRecorder(Recorder):
                 fut.result()
                 Recorder.stop(self, on_done)
 
-            self.mw.taskman.run_in_background(write_file, and_then)
+            self.mw.taskman.run_in_background(
+                write_file, and_then, uses_collection=False
+            )
 
         # schedule the stop for half a second in the future,
         # to avoid truncating the end of the recording
@@ -779,7 +806,7 @@ mpvManager: MpvManager | None = None
 
 # add everything from this module into anki.sound for backwards compat
 _exports = [i for i in locals().items() if not i[0].startswith("__")]
-for (k, v) in _exports:
+for k, v in _exports:
     sys.modules["anki.sound"].__dict__[k] = v
 
 # Tag handling
@@ -819,25 +846,26 @@ def play_clicked_audio(pycmd: str, card: Card) -> None:
 ##########################################################################
 
 
-def setup_audio(taskman: TaskManager, base_folder: str) -> None:
+def setup_audio(taskman: TaskManager, base_folder: str, media_folder: str) -> None:
     # legacy global var
     global mpvManager
 
     try:
-        mpvManager = MpvManager(base_folder)
+        mpvManager = MpvManager(base_folder, media_folder)
     except FileNotFoundError:
         print("mpv not found, reverting to mplayer")
     except aqt.mpv.MPVProcessError:
-        print("mpv too old, reverting to mplayer")
+        print(traceback.format_exc())
+        print("mpv too old or failed to open, reverting to mplayer")
 
     if mpvManager is not None:
         av_player.players.append(mpvManager)
 
         if is_win:
-            mpvPlayer = SimpleMpvPlayer(taskman, base_folder)
+            mpvPlayer = SimpleMpvPlayer(taskman, base_folder, media_folder)
             av_player.players.append(mpvPlayer)
     else:
-        mplayer = SimpleMplayerSlaveModePlayer(taskman)
+        mplayer = SimpleMplayerSlaveModePlayer(taskman, media_folder)
         av_player.players.append(mplayer)
 
     # tts support
@@ -857,5 +885,6 @@ def setup_audio(taskman: TaskManager, base_folder: str) -> None:
             if int(platform.version().split(".")[-1]) >= 17763:
                 av_player.players.append(WindowsRTTTSFilePlayer(taskman))
 
-    # cleanup at shutdown
-    atexit.register(av_player.shutdown)
+
+def cleanup_audio() -> None:
+    av_player.shutdown()

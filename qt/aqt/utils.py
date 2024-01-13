@@ -2,12 +2,18 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+import enum
+import inspect
 import os
 import re
+import shutil
 import subprocess
 import sys
-from functools import wraps
-from typing import TYPE_CHECKING, Any, Literal, Sequence, no_type_check
+from functools import partial, wraps
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence, Union
+
+from send2trash import send2trash
 
 import aqt
 from anki._legacy import DeprecatedNamesMixinForModule
@@ -21,29 +27,86 @@ from anki.utils import (
     version_with_build,
 )
 from aqt.qt import *
+from aqt.qt import (
+    PYQT_VERSION_STR,
+    QT_VERSION_STR,
+    QAction,
+    QApplication,
+    QCheckBox,
+    QColor,
+    QComboBox,
+    QDesktopServices,
+    QDialog,
+    QDialogButtonBox,
+    QEvent,
+    QFileDialog,
+    QFrame,
+    QHeaderView,
+    QIcon,
+    QKeySequence,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QMouseEvent,
+    QNativeGestureEvent,
+    QOffscreenSurface,
+    QOpenGLContext,
+    QPalette,
+    QPixmap,
+    QPlainTextEdit,
+    QPoint,
+    QPushButton,
+    QShortcut,
+    QSize,
+    QSplitter,
+    QStandardPaths,
+    Qt,
+    QTextBrowser,
+    QTextOption,
+    QTimer,
+    QUrl,
+    QVBoxLayout,
+    QWheelEvent,
+    QWidget,
+    pyqtSlot,
+    qconnect,
+    qtmajor,
+    qtminor,
+    qVersion,
+    traceback,
+)
 from aqt.theme import theme_manager
 
 if TYPE_CHECKING:
-    TextFormat = Union[Literal["plain", "rich"]]
+    TextFormat = Literal["plain", "rich", "markdown"]
+
+
+def aqt_data_path() -> Path:
+    # packaged?
+    if getattr(sys, "frozen", False):
+        prefix = Path(sys.prefix)
+        path = prefix / "lib/_aqt/data"
+        if path.exists():
+            return path
+        else:
+            return prefix / "../Resources/_aqt/data"
+    else:
+        import _aqt.colors
+
+        data_folder = Path(inspect.getfile(_aqt.colors)).with_name("data")
+        if data_folder.exists():
+            return data_folder.absolute()
+        else:
+            # should only happen when running unit tests
+            print("warning, data folder not found")
+            return Path(".")
 
 
 def aqt_data_folder() -> str:
-    # running in Bazel on macOS?
-    if path := os.getenv("AQT_DATA_FOLDER"):
-        return path
-    # packaged?
-    elif getattr(sys, "frozen", False):
-        path = os.path.join(sys.prefix, "lib/aqt/data")
-        if os.path.exists(path):
-            return path
-        else:
-            return os.path.join(sys.prefix, "../Resources/aqt/data")
-    elif os.path.exists(dir := os.path.join(os.path.dirname(__file__), "data")):
-        return os.path.abspath(dir)
-    else:
-        # should only happen when running unit tests
-        print("warning, data folder not found")
-        return "."
+    return str(aqt_data_path())
 
 
 # shortcut to access Fluent translations; set as
@@ -66,10 +129,124 @@ def openLink(link: str | QUrl) -> None:
         QDesktopServices.openUrl(QUrl(link))
 
 
+class MessageBox(QMessageBox):
+    def __init__(
+        self,
+        text: str,
+        callback: Callable[[int], None] | None = None,
+        parent: QWidget | None = None,
+        icon: QMessageBox.Icon = QMessageBox.Icon.NoIcon,
+        help: HelpPageArgument | None = None,
+        title: str = "Anki",
+        buttons: Sequence[
+            str | QMessageBox.StandardButton | tuple[str, QMessageBox.ButtonRole]
+        ]
+        | None = None,
+        default_button: int = 0,
+        textFormat: Qt.TextFormat = Qt.TextFormat.PlainText,
+        modality: Qt.WindowModality = Qt.WindowModality.WindowModal,
+    ) -> None:
+        parent = parent or aqt.mw.app.activeWindow() or aqt.mw
+        super().__init__(parent)
+        self.setText(text)
+        self.setWindowTitle(title)
+        self.setWindowModality(modality)
+        self.setIcon(icon)
+        if icon == QMessageBox.Icon.Question and theme_manager.night_mode:
+            img = self.iconPixmap().toImage()
+            img.invertPixels()
+            self.setIconPixmap(QPixmap(img))
+        self.setTextFormat(textFormat)
+        if buttons is None:
+            buttons = [QMessageBox.StandardButton.Ok]
+        for i, button in enumerate(buttons):
+            if isinstance(button, str):
+                b = self.addButton(button, QMessageBox.ButtonRole.ActionRole)
+            elif isinstance(button, QMessageBox.StandardButton):
+                b = self.addButton(button)
+            elif isinstance(button, tuple):
+                b = self.addButton(button[0], button[1])
+            else:
+                continue
+            if callback is not None:
+                qconnect(b.clicked, partial(callback, i))
+            if i == default_button:
+                self.setDefaultButton(b)
+        if help is not None:
+            b = self.addButton(QMessageBox.StandardButton.Help)
+            qconnect(b.clicked, lambda: openHelp(help))
+        self.open()
+
+
+def ask_user(
+    text: str,
+    callback: Callable[[bool], None],
+    defaults_yes: bool = True,
+    **kwargs: Any,
+) -> MessageBox:
+    "Shows a yes/no question, passes the answer to the callback function as a bool."
+    return MessageBox(
+        text,
+        callback=lambda response: callback(not response),
+        icon=QMessageBox.Icon.Question,
+        buttons=[QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No],
+        default_button=not defaults_yes,
+        **kwargs,
+    )
+
+
+def ask_user_dialog(
+    text: str,
+    callback: Callable[[int], None],
+    buttons: Sequence[
+        str | QMessageBox.StandardButton | tuple[str, QMessageBox.ButtonRole]
+    ]
+    | None = None,
+    default_button: int = 1,
+    **kwargs: Any,
+) -> MessageBox:
+    "Shows a question to the user, passes the index of the button clicked to the callback."
+    if buttons is None:
+        buttons = [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No]
+    return MessageBox(
+        text,
+        callback=callback,
+        icon=QMessageBox.Icon.Question,
+        buttons=buttons,
+        default_button=default_button,
+        **kwargs,
+    )
+
+
+def show_info(text: str, callback: Callable | None = None, **kwargs: Any) -> MessageBox:
+    "Show a small info window with an OK button."
+    if "icon" not in kwargs:
+        kwargs["icon"] = QMessageBox.Icon.Information
+    return MessageBox(
+        text,
+        callback=(lambda _: callback()) if callback is not None else None,
+        **kwargs,
+    )
+
+
+def show_warning(
+    text: str, callback: Callable | None = None, **kwargs: Any
+) -> MessageBox:
+    "Show a small warning window with an OK button."
+    return show_info(text, icon=QMessageBox.Icon.Warning, callback=callback, **kwargs)
+
+
+def show_critical(
+    text: str, callback: Callable | None = None, **kwargs: Any
+) -> MessageBox:
+    "Show a small critical error window with an OK button."
+    return show_info(text, icon=QMessageBox.Icon.Critical, callback=callback, **kwargs)
+
+
 def showWarning(
     text: str,
     parent: QWidget | None = None,
-    help: HelpPageArgument = "",
+    help: HelpPageArgument | None = None,
     title: str = "Anki",
     textFormat: TextFormat | None = None,
 ) -> int:
@@ -91,7 +268,7 @@ def showCritical(
 def showInfo(
     text: str,
     parent: QWidget | None = None,
-    help: HelpPageArgument = "",
+    help: HelpPageArgument | None = None,
     type: str = "info",
     title: str = "Anki",
     textFormat: TextFormat | None = None,
@@ -114,6 +291,8 @@ def showInfo(
         mb.setTextFormat(Qt.TextFormat.PlainText)
     elif textFormat == "rich":
         mb.setTextFormat(Qt.TextFormat.RichText)
+    elif textFormat == "markdown":
+        mb.setTextFormat(Qt.TextFormat.MarkdownText)
     elif textFormat is not None:
         raise Exception("unexpected textFormat type")
     mb.setText(text)
@@ -129,7 +308,7 @@ def showInfo(
     else:
         b = mb.addButton(QMessageBox.StandardButton.Ok)
         b.setDefault(True)
-    if help:
+    if help is not None:
         b = mb.addButton(QMessageBox.StandardButton.Help)
         qconnect(b.clicked, lambda: openHelp(help))
         b.setAutoDefault(False)
@@ -323,6 +502,7 @@ class GetTextDialog(QDialog):
                 b.button(QDialogButtonBox.StandardButton.Help).clicked,
                 self.helpRequested,
             )
+        self.l.setFocus()
 
     def accept(self) -> None:
         return QDialog.accept(self)
@@ -426,7 +606,7 @@ def getFile(
     title: str,
     # single file returned unless multi=True
     cb: Callable[[str | Sequence[str]], None] | None,
-    filter: str = "*.*",
+    filter: str = "*",
     dir: str | None = None,
     key: str | None = None,
     multi: bool = False,  # controls whether a single or multiple files is returned
@@ -471,6 +651,23 @@ def getFile(
     return ret[0] if ret else None
 
 
+def running_in_sandbox():
+    """Check whether running in Flatpak or Snap. When in such a sandbox, Qt
+    will not report the true location of user-chosen files, but instead a
+    temporary location from which the sandboxing software will copy the file to
+    the user-chosen destination. Thus file renames are impossible and caching
+    the reported file location is unhelpful."""
+    in_flatpak = (
+        QStandardPaths.locate(
+            QStandardPaths.StandardLocation.RuntimeLocation,
+            "flatpak-info",
+        )
+        != ""
+    )
+    in_snap = bool(os.environ.get("SNAP"))
+    return in_flatpak or in_snap
+
+
 def getSaveFile(
     parent: QDialog,
     title: str,
@@ -495,7 +692,7 @@ def getSaveFile(
         f"{key} (*{ext})",
         options=QFileDialog.Option.DontConfirmOverwrite,
     )[0]
-    if file:
+    if file and not running_in_sandbox():
         # add extension
         if not file.lower().endswith(ext):
             file += ext
@@ -509,35 +706,53 @@ def getSaveFile(
     return file
 
 
+class _QtStateKeyKind(enum.Enum):
+    HEADER = enum.auto()
+    SPLITTER = enum.auto()
+    STATE = enum.auto()
+    GEOMETRY = enum.auto()
+
+
+def _qt_state_key(kind: _QtStateKeyKind, key: str) -> str:
+    """Construct a key used to save/restore geometry, state, etc.
+
+    Adds Qt version number to key so that different data is saved per Qt version,
+    preventing crashes and bugs when restoring data saved with a different Qt version.
+    """
+    qt_suffix = f"{qtmajor}.{qtminor}" if qtmajor > 5 else ""
+    return f"{key}{kind.name.capitalize()}{qt_suffix}"
+
+
 def saveGeom(widget: QWidget, key: str) -> None:
-    # restoring a fullscreen window is buggy
-    # (at the time of writing; Qt 6.2.2 and 5.15)
-    if not widget.isFullScreen():
-        aqt.mw.pm.profile[f"{key}Geom"] = widget.saveGeometry()
+    # restoring a fullscreen window breaks the tab functionality of 5.15
+    if not widget.isFullScreen() or qtmajor == 6:
+        key = _qt_state_key(_QtStateKeyKind.GEOMETRY, key)
+        aqt.mw.pm.profile[key] = widget.saveGeometry()
 
 
 def restoreGeom(
-    widget: QWidget, key: str, offset: int | None = None, adjustSize: bool = False
+    widget: QWidget,
+    key: str,
+    adjustSize: bool = False,
+    default_size: tuple[int, int] | None = None,
 ) -> None:
-    key += "Geom"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreGeometry(aqt.mw.pm.profile[key])
-        if is_mac and offset:
-            if qtmajor > 5 or qtminor > 6:
-                # bug in osx toolkit
-                s = widget.size()
-                widget.resize(s.width(), s.height() + offset * 2)
+    key = _qt_state_key(_QtStateKeyKind.GEOMETRY, key)
+    if existing_geom := aqt.mw.pm.profile.get(key):
+        widget.restoreGeometry(existing_geom)
         ensureWidgetInScreenBoundaries(widget)
-    else:
-        if adjustSize:
-            widget.adjustSize()
+    elif adjustSize:
+        widget.adjustSize()
+    elif default_size:
+        widget.resize(*default_size)
 
 
 def ensureWidgetInScreenBoundaries(widget: QWidget) -> None:
     handle = widget.window().windowHandle()
     if not handle:
         # window has not yet been shown, retry later
-        aqt.mw.progress.timer(50, lambda: ensureWidgetInScreenBoundaries(widget), False)
+        aqt.mw.progress.timer(
+            50, lambda: ensureWidgetInScreenBoundaries(widget), False, parent=widget
+        )
         return
 
     # ensure widget is smaller than screen bounds
@@ -560,39 +775,35 @@ def ensureWidgetInScreenBoundaries(widget: QWidget) -> None:
 
 
 def saveState(widget: QFileDialog | QMainWindow, key: str) -> None:
-    key += "State"
+    key = _qt_state_key(_QtStateKeyKind.STATE, key)
     aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreState(widget: QFileDialog | QMainWindow, key: str) -> None:
-    key += "State"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreState(aqt.mw.pm.profile[key])
+    key = _qt_state_key(_QtStateKeyKind.STATE, key)
+    if data := aqt.mw.pm.profile.get(key):
+        widget.restoreState(data)
 
 
 def saveSplitter(widget: QSplitter, key: str) -> None:
-    key += "Splitter"
+    key = _qt_state_key(_QtStateKeyKind.SPLITTER, key)
     aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreSplitter(widget: QSplitter, key: str) -> None:
-    key += "Splitter"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreState(aqt.mw.pm.profile[key])
-
-
-def _header_key(key: str) -> str:
-    # not compatible across major versions
-    qt_suffix = f"Qt{qtmajor}" if qtmajor > 5 else ""
-    return f"{key}Header{qt_suffix}"
+    key = _qt_state_key(_QtStateKeyKind.SPLITTER, key)
+    if data := aqt.mw.pm.profile.get(key):
+        widget.restoreState(data)
 
 
 def saveHeader(widget: QHeaderView, key: str) -> None:
-    aqt.mw.pm.profile[_header_key(key)] = widget.saveState()
+    key = _qt_state_key(_QtStateKeyKind.HEADER, key)
+    aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreHeader(widget: QHeaderView, key: str) -> None:
-    if state := aqt.mw.pm.profile.get(_header_key(key)):
+    key = _qt_state_key(_QtStateKeyKind.HEADER, key)
+    if state := aqt.mw.pm.profile.get(key):
         widget.restoreState(state)
 
 
@@ -687,6 +898,13 @@ def addCloseShortcut(widg: QDialog) -> None:
     setattr(widg, "_closeShortcut", shortcut)
 
 
+def add_close_shortcut(widg: QWidget) -> None:
+    if not is_mac:
+        return
+    shortcut = QShortcut(QKeySequence("Ctrl+W"), widg)
+    qconnect(shortcut.activated, widg.close)
+
+
 def downArrow() -> str:
     if is_win:
         return "▼"
@@ -699,6 +917,21 @@ def current_window() -> QWidget | None:
         return widget.window()
     else:
         return None
+
+
+def send_to_trash(path: Path) -> None:
+    "Place file/folder in recycling bin, or delete permanently on failure."
+    if not path.exists():
+        return
+    try:
+        send2trash(path)
+    except Exception as exc:
+        # Linux users may not have a trash folder set up
+        print("trash failure:", path, exc)
+        if path.is_dir:
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 # Tooltips
@@ -745,7 +978,7 @@ def tooltip(
     lab.move(aw.mapToGlobal(QPoint(0 + x_offset, aw.height() - y_offset)))
     lab.show()
     _tooltipTimer = aqt.mw.progress.timer(
-        period, closeTooltip, False, requiresCollection=False
+        period, closeTooltip, False, requiresCollection=False, parent=aw
     )
     _tooltipLabel = lab
 
@@ -755,12 +988,15 @@ def closeTooltip() -> None:
     if _tooltipLabel:
         try:
             _tooltipLabel.deleteLater()
-        except:
+        except RuntimeError:
             # already deleted as parent window closed
             pass
         _tooltipLabel = None
     if _tooltipTimer:
-        _tooltipTimer.stop()
+        try:
+            _tooltipTimer.deleteLater()
+        except RuntimeError:
+            pass
         _tooltipTimer = None
 
 
@@ -847,6 +1083,17 @@ def qtMenuShortcutWorkaround(qmenu: QMenu) -> None:
 ######################################################################
 
 
+def disallow_full_screen() -> bool:
+    """Test for OpenGl on Windows, which is known to cause issues with full screen mode."""
+    from aqt import mw
+    from aqt.profiles import VideoDriver
+
+    return is_win and (
+        mw.pm.video_driver() == VideoDriver.OpenGL
+        and not os.environ.get("ANKI_SOFTWAREOPENGL")
+    )
+
+
 def add_ellipsis_to_action_label(*actions: QAction) -> None:
     """Pass actions to add '...' to their labels, indicating that more input is
     required before they can be performed.
@@ -860,48 +1107,28 @@ def add_ellipsis_to_action_label(*actions: QAction) -> None:
 
 def supportText() -> str:
     import platform
-    import time
 
     from aqt import mw
 
-    if is_win:
-        platname = f"Windows {platform.win32_ver()[0]}"
-    elif is_mac:
-        platname = f"Mac {platform.mac_ver()[0]}"
-    else:
-        platname = "Linux"
-
-    def schedVer() -> str:
-        try:
-            if mw.col.v3_scheduler():
-                return "3"
-            else:
-                return str(mw.col.sched_ver())
-        except:
-            return "?"
-
-    lc = mw.pm.last_addon_update_check()
-    lcfmt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lc))
+    platname = platform.platform()
 
     return """\
-Anki {} Python {} Qt {} PyQt {}
+Anki {} {} {}
+Python {} Qt {} PyQt {}
 Platform: {}
-Flags: frz={} ao={} sv={}
-Add-ons, last update check: {}
 """.format(
         version_with_build(),
+        "(src)" if not getattr(sys, "frozen", False) else "",
+        "(ao)" if mw.addonManager.dirty else "",
         platform.python_version(),
-        QT_VERSION_STR,
+        qVersion(),
         PYQT_VERSION_STR,
         platname,
-        getattr(sys, "frozen", False),
-        mw.addonManager.dirty,
-        schedVer(),
-        lcfmt,
     )
 
 
 ######################################################################
+
 
 # adapted from version detection in qutebrowser
 def opengl_vendor() -> str | None:
@@ -955,7 +1182,7 @@ def gfxDriverIsBroken() -> bool:
 
 def startup_info() -> Any:
     "Use subprocess.Popen(startupinfo=...) to avoid opening a console window."
-    if not sys.platform == "win32":
+    if sys.platform != "win32":
         return None
     si = subprocess.STARTUPINFO()  # pytype: disable=module-attr
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # pytype: disable=module-attr
@@ -1002,19 +1229,16 @@ def no_arg_trigger(func: Callable) -> Callable:
     return pyqtSlot()(func)  # type: ignore
 
 
-def is_zoom_event(evt: QEvent) -> bool:
-    """If the event will trigger zoom.
+def is_gesture_or_zoom_event(evt: QEvent) -> bool:
+    """If the event is a gesture and/or will trigger zoom.
 
-    Includes zoom by pinching, Ctrl-scrolling, and Meta-scrolling,
-    where scrolling may be triggered by mouse wheel or gesture.
+    Includes zoom by pinching, and Ctrl-scrolling on Win and Linux.
     """
 
     return isinstance(evt, QNativeGestureEvent) or (
         isinstance(evt, QWheelEvent)
-        and (
-            (is_mac and KeyboardModifiersPressed().meta)
-            or KeyboardModifiersPressed().control
-        )
+        and not is_mac
+        and KeyboardModifiersPressed().control
     )
 
 
@@ -1047,6 +1271,7 @@ class KeyboardModifiersPressed:
 _deprecated_names = DeprecatedNamesMixinForModule(globals())
 
 
-@no_type_check
-def __getattr__(name: str) -> Any:
-    return _deprecated_names.__getattr__(name)
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        return _deprecated_names.__getattr__(name)

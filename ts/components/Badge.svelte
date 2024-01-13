@@ -3,10 +3,9 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import { createEventDispatcher, onMount } from "svelte";
+
     import IconConstrain from "./IconConstrain.svelte";
-    import type { DropdownProps } from "./dropdown";
-    import { dropdownKey } from "./context-keys";
-    import { onMount, createEventDispatcher, getContext } from "svelte";
 
     let className = "";
     export { className as class };
@@ -20,31 +19,40 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     let spanRef: HTMLSpanElement;
 
-    const dropdownProps = getContext<DropdownProps>(dropdownKey) ?? { dropdown: false };
-
     onMount(() => {
         dispatch("mount", { span: spanRef });
     });
 </script>
 
-<span
+<button
     bind:this={spanRef}
     title={tooltip}
     class="badge {className}"
-    class:dropdown-toggle={dropdownProps.dropdown}
-    {...dropdownProps}
     on:click
     on:mouseenter
     on:mouseleave
+    tabindex="-1"
 >
     <IconConstrain {iconSize} {widthMultiplier} {flipX}>
         <slot />
     </IconConstrain>
-</span>
+</button>
 
 <style>
     .badge {
         color: var(--badge-color, inherit);
+        border: none;
+        background: transparent;
+        padding: 0;
+        /* remove default macOS styling */
+        box-shadow: none;
+    }
+
+    .badge:hover,
+    .badge:active {
+        border: none;
+        background: transparent;
+        box-shadow: none;
     }
 
     .dropdown-toggle::after {

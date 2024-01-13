@@ -21,8 +21,8 @@ impl Collection {
                 let current = self
                     .storage
                     .get_deck(deck.id)?
-                    .ok_or_else(|| AnkiError::invalid_input("deck disappeared"))?;
-                self.update_single_deck_undoable(&mut *deck, current)
+                    .or_invalid("deck disappeared")?;
+                self.update_single_deck_undoable(&mut deck, current)
             }
             UndoableDeckChange::Removed(deck) => self.restore_deleted_deck(*deck),
             UndoableDeckChange::GraveAdded(e) => self.remove_deck_grave(e.0, e.1),
@@ -60,9 +60,9 @@ impl Collection {
         Ok(())
     }
 
-    /// Update an individual, existing deck. Caller is responsible for ensuring deck
-    /// is normalized, matches parents, is not a duplicate name, and bumping mtime.
-    /// Clears deck cache.
+    /// Update an individual, existing deck. Caller is responsible for ensuring
+    /// deck is normalized, matches parents, is not a duplicate name, and
+    /// bumping mtime. Clears deck cache.
     pub(super) fn update_single_deck_undoable(
         &mut self,
         deck: &mut Deck,

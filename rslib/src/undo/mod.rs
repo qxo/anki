@@ -8,10 +8,9 @@ use std::collections::VecDeque;
 pub(crate) use changes::UndoableChange;
 
 pub use crate::ops::Op;
-use crate::{
-    ops::{OpChanges, StateChanges},
-    prelude::*,
-};
+use crate::ops::OpChanges;
+use crate::ops::StateChanges;
+use crate::prelude::*;
 
 const UNDO_LIMIT: usize = 30;
 
@@ -30,7 +29,7 @@ impl UndoableOp {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 enum UndoMode {
     NormalOp,
     Undoing,
@@ -149,7 +148,7 @@ impl UndoManager {
                 }
             })
             .next()
-            .ok_or_else(|| AnkiError::invalid_input("target undo op not found"))?;
+            .or_invalid("target undo op not found")?;
         let mut removed = vec![];
         for _ in 0..target_idx {
             removed.push(self.undo_steps.pop_front().unwrap());
@@ -158,7 +157,7 @@ impl UndoManager {
         for step in removed.into_iter().rev() {
             target.changes.extend(step.changes.into_iter());
         }
-
+        self.counter = starting_from;
         Ok(OpChanges {
             op: target.kind.clone(),
             changes: StateChanges::from(&target.changes[..]),
@@ -212,7 +211,8 @@ impl Collection {
         self.state.undo.merge_undoable_ops(starting_from)
     }
 
-    /// Add an empty custom undo step, which subsequent changes can be merged into.
+    /// Add an empty custom undo step, which subsequent changes can be merged
+    /// into.
     pub fn add_custom_undo_step(&mut self, name: String) -> usize {
         self.state.undo.add_custom_step(name)
     }
@@ -276,8 +276,8 @@ impl Collection {
             .pop()
     }
 
-    /// Return changes made by the current op. Must only be called in a transaction,
-    /// when an operation was passed to transact().
+    /// Return changes made by the current op. Must only be called in a
+    /// transaction, when an operation was passed to transact().
     pub(crate) fn op_changes(&self) -> OpChanges {
         self.state.undo.op_changes()
     }
@@ -331,11 +331,12 @@ impl From<&[UndoableChange]> for StateChanges {
 #[cfg(test)]
 mod test {
     use super::UndoableChange;
-    use crate::{card::Card, collection::open_test_collection, prelude::*};
+    use crate::card::Card;
+    use crate::prelude::*;
 
     #[test]
     fn undo() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let mut card = Card {
             interval: 1,
@@ -443,7 +444,7 @@ mod test {
 
     #[test]
     fn custom() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         // perform some actions in separate steps
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
@@ -507,7 +508,7 @@ mod test {
 
     #[test]
     fn undo_mtime_bump() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         col.storage.db.execute_batch("update col set mod = 0")?;
 
         // a no-op change should not bump mtime

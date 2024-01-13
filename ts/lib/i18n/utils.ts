@@ -2,26 +2,28 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import "intl-pluralrules";
+
 import { FluentBundle, FluentResource } from "@fluent/bundle";
+import { i18nResources } from "@tslib/backend";
+import type { ModuleName } from "@tslib/ftl";
 
 import { firstLanguage, setBundles } from "./bundles";
-import type { ModuleName } from "./modules";
 
 export function supportsVerticalText(): boolean {
     const firstLang = firstLanguage();
     return (
-        firstLang.startsWith("ja") ||
-        firstLang.startsWith("zh") ||
-        firstLang.startsWith("ko")
+        firstLang.startsWith("ja")
+        || firstLang.startsWith("zh")
+        || firstLang.startsWith("ko")
     );
 }
 
 export function direction(): string {
     const firstLang = firstLanguage();
     if (
-        firstLang.startsWith("ar") ||
-        firstLang.startsWith("he") ||
-        firstLang.startsWith("fa")
+        firstLang.startsWith("ar")
+        || firstLang.startsWith("he")
+        || firstLang.startsWith("fa")
     ) {
         return "rtl";
     } else {
@@ -62,8 +64,8 @@ export function localeCompare(
     return first.localeCompare(second, langs, options);
 }
 
-/// Treat text like HTML, merging multiple spaces and converting
-/// newlines to spaces.
+/** Treat text like HTML, merging multiple spaces and converting
+ newlines to spaces. */
 export function withCollapsedWhitespace(s: string): string {
     return s.replace(/\s+/g, " ");
 }
@@ -73,19 +75,13 @@ export function withoutUnicodeIsolation(s: string): string {
 }
 
 export async function setupI18n(args: { modules: ModuleName[] }): Promise<void> {
-    const resp = await fetch("/_anki/i18nResources", {
-        method: "POST",
-        body: JSON.stringify(args),
-    });
-    if (!resp.ok) {
-        throw Error(`unexpected reply: ${resp.statusText}`);
-    }
-    const json = await resp.json();
+    const resources = await i18nResources(args);
+    const json = JSON.parse(new TextDecoder().decode(resources.json));
 
     const newBundles: FluentBundle[] = [];
-    for (const i in json.resources) {
-        const text = json.resources[i];
-        const lang = json.langs[i];
+    for (const res in json.resources) {
+        const text = json.resources[res];
+        const lang = json.langs[res];
         const bundle = new FluentBundle([lang, "en-US"]);
         const resource = new FluentResource(text);
         bundle.addResource(resource);

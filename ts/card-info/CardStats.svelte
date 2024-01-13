@@ -3,53 +3,49 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr2 from "../lib/ftl";
-    import { Stats, unwrapOptionalNumber } from "../lib/proto";
-    import { Timestamp, timeSpan, DAY } from "../lib/time";
+    import type { CardStatsResponse } from "@tslib/anki/stats_pb";
+    import * as tr2 from "@tslib/ftl";
+    import { DAY, timeSpan, Timestamp } from "@tslib/time";
 
-    export let stats: Stats.CardStatsResponse;
+    export let stats: CardStatsResponse;
 
-    function dateString(timestamp: number): string {
-        return new Timestamp(timestamp).dateString();
+    function dateString(timestamp: bigint): string {
+        return new Timestamp(Number(timestamp)).dateString();
     }
 
     interface StatsRow {
         label: string;
-        value: string | number;
+        value: string | number | bigint;
     }
 
-    function rowsFromStats(stats: Stats.CardStatsResponse): StatsRow[] {
+    function rowsFromStats(stats: CardStatsResponse): StatsRow[] {
         const statsRows: StatsRow[] = [];
 
         statsRows.push({ label: tr2.cardStatsAdded(), value: dateString(stats.added) });
 
-        const firstReview = unwrapOptionalNumber(stats.firstReview);
-        if (firstReview !== undefined) {
+        if (stats.firstReview != null) {
             statsRows.push({
                 label: tr2.cardStatsFirstReview(),
-                value: dateString(firstReview),
+                value: dateString(stats.firstReview),
             });
         }
-        const latestReview = unwrapOptionalNumber(stats.latestReview);
-        if (latestReview !== undefined) {
+        if (stats.latestReview != null) {
             statsRows.push({
                 label: tr2.cardStatsLatestReview(),
-                value: dateString(latestReview),
+                value: dateString(stats.latestReview),
             });
         }
 
-        const dueDate = unwrapOptionalNumber(stats.dueDate);
-        if (dueDate !== undefined) {
+        if (stats.dueDate != null) {
             statsRows.push({
                 label: tr2.statisticsDueDate(),
-                value: dateString(dueDate),
+                value: dateString(stats.dueDate),
             });
         }
-        const duePosition = unwrapOptionalNumber(stats.duePosition);
-        if (duePosition !== undefined) {
+        if (stats.duePosition != null) {
             statsRows.push({
                 label: tr2.cardStatsNewCardPosition(),
-                value: duePosition,
+                value: stats.duePosition,
             });
         }
 
@@ -59,11 +55,38 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 value: timeSpan(stats.interval * DAY),
             });
         }
-        if (stats.ease) {
+        if (stats.memoryState) {
+            let stability = timeSpan(stats.memoryState.stability * 86400, false, false);
+            if (stats.memoryState.stability > 31) {
+                const nativeStability = stats.memoryState.stability.toFixed(0);
+                stability += ` (${nativeStability})`;
+            }
             statsRows.push({
-                label: tr2.cardStatsEase(),
-                value: `${stats.ease / 10}%`,
+                label: tr2.cardStatsFsrsStability(),
+                value: stability,
             });
+            const difficulty = (
+                ((stats.memoryState.difficulty - 1.0) / 9.0) *
+                100.0
+            ).toFixed(0);
+            statsRows.push({
+                label: tr2.cardStatsFsrsDifficulty(),
+                value: `${difficulty}%`,
+            });
+            if (stats.fsrsRetrievability) {
+                const retrievability = (stats.fsrsRetrievability * 100).toFixed(0);
+                statsRows.push({
+                    label: tr2.cardStatsFsrsRetrievability(),
+                    value: `${retrievability}%`,
+                });
+            }
+        } else {
+            if (stats.ease) {
+                statsRows.push({
+                    label: tr2.cardStatsEase(),
+                    value: `${stats.ease / 10}%`,
+                });
+            }
         }
 
         statsRows.push({ label: tr2.cardStatsReviewCount(), value: stats.reviews });
@@ -86,6 +109,22 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
         statsRows.push({ label: tr2.cardStatsCardId(), value: stats.cardId });
         statsRows.push({ label: tr2.cardStatsNoteId(), value: stats.noteId });
+
+        if (stats.customData) {
+            let value: string;
+            try {
+                const obj = JSON.parse(stats.customData);
+                value = Object.entries(obj)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(" ");
+            } catch (exc) {
+                value = stats.customData;
+            }
+            statsRows.push({
+                label: tr2.cardStatsCustomData(),
+                value: value,
+            });
+        }
 
         return statsRows;
     }

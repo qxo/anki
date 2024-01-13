@@ -1,10 +1,12 @@
-@use "vars";
-@use "scrollbar";
+@use "vars" as *;
+@use "root-vars";
+@use "button-mixins" as button;
+@use "sass/scrollbar";
 
-$body-color: var(--text-fg);
-$body-bg: var(--window-bg);
-
-$link-hover-color: var(--link);
+$body-color: palette(darkgray, 9);
+$body-color-dark: palette(lightgray, 0);
+$body-bg: palette(lightgray, 2);
+$body-bg-dark: palette(darkgray, 5);
 $link-hover-decoration: none;
 
 $utilities: (
@@ -37,17 +39,27 @@ body {
     height: 100%;
 }
 
-* {
+html {
     overscroll-behavior: none;
 }
 
-.night-mode {
-    @include scrollbar.night-mode;
+body {
+    overflow-x: hidden;
+    &:not(.isMac),
+    &:not(.isMac) * {
+        @include scrollbar.custom;
+    }
+    &.no-blur * {
+        backdrop-filter: none !important;
+    }
 }
 
-button {
+button:not(.btn, .btn-close) {
     /* override transition for instant hover response */
-    transition: color 0.15s ease-in-out, box-shadow 0.15s ease-in-out !important;
+    transition: color var(--transition) ease-in-out,
+        box-shadow var(--transition) ease-in-out !important;
+    border-radius: prop(border-radius);
+    @include button.base;
 }
 
 pre,
@@ -57,21 +69,16 @@ samp {
     unicode-bidi: normal !important;
 }
 
-.isWin {
-    --base-font-size: 12px;
+label,
+input[type="radio"],
+input[type="checkbox"] {
+    cursor: pointer;
 }
-
-.isMac {
-    --base-font-size: 13px;
-}
-
-.isLin {
-    --base-font-size: 14px;
-}
-
-[dir="rtl"] {
-    .form-select {
-        /* flip <select>'s arrow */
-        background-position: left 0.75rem center;
+input[type="text"] {
+    border-radius: prop(border-radius);
+    outline: none;
+    border: 1px solid color(border);
+    &:focus {
+        border-color: color(border-focus);
     }
 }

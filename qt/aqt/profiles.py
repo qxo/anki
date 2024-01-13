@@ -9,22 +9,28 @@ import random
 import shutil
 import traceback
 from enum import Enum
-from typing import Any
-
-from send2trash import send2trash
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
 
 import anki.lang
 import aqt.forms
 import aqt.sound
+from anki._legacy import deprecated
 from anki.collection import Collection
 from anki.db import DB
 from anki.lang import without_unicode_isolation
 from anki.sync import SyncAuth
-from anki.utils import int_time, is_mac, is_win
-from aqt import appHelpSite
+from anki.utils import int_time, int_version, is_mac, is_win
+from aqt import appHelpSite, gui_hooks
 from aqt.qt import *
-from aqt.theme import Theme
-from aqt.utils import disable_help_button, showWarning, tr
+from aqt.theme import Theme, WidgetStyle, theme_manager
+from aqt.toolbar import HideMode
+from aqt.utils import disable_help_button, send_to_trash, showWarning, tr
+
+if TYPE_CHECKING:
+    from aqt.browser.layout import BrowserLayout
+    from aqt.editor import EditorMode
+
 
 # Profile handling
 ##########################################################################
@@ -36,33 +42,42 @@ class VideoDriver(Enum):
     OpenGL = "auto"
     ANGLE = "angle"
     Software = "software"
+    Metal = "metal"
+    Vulkan = "vulkan"
+    Direct3D = "d3d11"
 
     @staticmethod
     def default_for_platform() -> VideoDriver:
-        if is_mac:
-            return VideoDriver.OpenGL
-        else:
-            return VideoDriver.Software
+        return VideoDriver.all_for_platform()[0]
 
     def constrained_to_platform(self) -> VideoDriver:
-        if self == VideoDriver.ANGLE and not is_win:
-            return VideoDriver.Software
+        if self not in VideoDriver.all_for_platform():
+            return VideoDriver.default_for_platform()
         return self
 
     def next(self) -> VideoDriver:
-        if self == VideoDriver.Software:
-            return VideoDriver.OpenGL
-        elif self == VideoDriver.OpenGL and is_win:
-            return VideoDriver.ANGLE
-        else:
-            return VideoDriver.Software
+        all = VideoDriver.all_for_platform()
+        try:
+            idx = (all.index(self) + 1) % len(all)
+        except ValueError:
+            idx = 0
+        return all[idx]
 
     @staticmethod
     def all_for_platform() -> list[VideoDriver]:
-        all = [VideoDriver.OpenGL]
-        if is_win:
+        all = []
+        if qtmajor > 5:
+            if is_win:
+                all.append(VideoDriver.Direct3D)
+            if is_mac:
+                all.append(VideoDriver.Metal)
+        all.append(VideoDriver.OpenGL)
+        if qtmajor > 5 and not is_mac:
+            all.append(VideoDriver.Vulkan)
+        if is_win and qtmajor < 6:
             all.append(VideoDriver.ANGLE)
         all.append(VideoDriver.Software)
+
         return all
 
 
@@ -70,8 +85,8 @@ metaConf = dict(
     ver=0,
     updates=True,
     created=int_time(),
-    id=random.randrange(0, 2 ** 63),
-    lastMsg=-1,
+    id=random.randrange(0, 2**63),
+    lastMsg=0,
     suppressUpdate=False,
     firstRun=True,
     defaultLang=None,
@@ -85,8 +100,6 @@ profileConf: dict[str, Any] = dict(
     lastOptimize=int_time(),
     # editing
     searchHistory=[],
-    lastTextColor="#00f",
-    lastHighlightColor="#00f",
     # syncing
     syncKey=None,
     syncMedia=True,
@@ -108,46 +121,42 @@ class LoadMetaResult:
 
 
 class ProfileManager:
-    def __init__(self, base: str | None = None) -> None:  #
+    default_answer_keys = {ease_num: str(ease_num) for ease_num in range(1, 5)}
+    last_run_version: int = 0
+
+    def __init__(self, base: Path) -> None:  #
+        "base should be retrieved via ProfileMangager.get_created_base_folder"
         ## Settings which should be forgotten each Anki restart
         self.session: dict[str, Any] = {}
         self.name: str | None = None
         self.db: DB | None = None
         self.profile: dict | None = None
-        # instantiate base folder
-        self.base: str
-        self._setBaseFolder(base)
+        self.invalid_profile_provided_on_commandline = False
+        self.base = str(base)
 
     def setupMeta(self) -> LoadMetaResult:
         # load metadata
         res = self._loadMeta()
         self.firstRun = res.firstTime
+        self.last_run_version = self.meta.get("last_run_version", self.last_run_version)
+        self.meta["last_run_version"] = int_version()
         return res
 
-    # profile load on startup
+    # -p profile provided on command line.
     def openProfile(self, profile: str) -> None:
-        if profile:
-            if profile not in self.profiles():
-                QMessageBox.critical(
-                    None, tr.qt_misc_error(), tr.profiles_profile_does_not_exist()
-                )
-                sys.exit(1)
+        if profile not in self.profiles():
+            self.invalid_profile_provided_on_commandline = True
+        else:
             try:
                 self.load(profile)
-            except TypeError as exc:
-                raise Exception("Provided profile does not exist.") from exc
-
-    # Base creation
-    ######################################################################
-
-    def ensureBaseExists(self) -> None:
-        self._ensureExists(self.base)
+            except Exception as exc:
+                self.invalid_profile_provided_on_commandline = True
 
     # Profile load/save
     ######################################################################
 
-    def profiles(self) -> list:
-        def names() -> list:
+    def profiles(self) -> list[str]:
+        def names() -> list[str]:
             return self.db.list("select name from profiles where name != '_global'")
 
         n = names()
@@ -217,6 +226,7 @@ class ProfileManager:
             print("resetting corrupt profile")
             self.profile = profileConf.copy()
             self.save()
+        self.set_last_loaded_profile_name(name)
         return True
 
     def save(self) -> None:
@@ -233,16 +243,14 @@ class ProfileManager:
         self.db.commit()
 
     def remove(self, name: str) -> None:
-        p = self.profileFolder()
-        if os.path.exists(p):
-            send2trash(p)
+        path = self.profileFolder(create=False)
+        send_to_trash(Path(path))
         self.db.execute("delete from profiles where name = ?", name)
         self.db.commit()
 
     def trashCollection(self) -> None:
-        p = self.collectionPath()
-        if os.path.exists(p):
-            send2trash(p)
+        path = self.collectionPath()
+        send_to_trash(Path(path))
 
     def rename(self, name: str) -> None:
         oldName = self.name
@@ -317,7 +325,7 @@ class ProfileManager:
                     continue
             try:
                 c = Collection(path)
-                c.close(save=False, downgrade=True)
+                c.close(downgrade=True)
             except Exception as e:
                 print(e)
                 problem_profiles.append(name)
@@ -331,16 +339,19 @@ class ProfileManager:
             os.makedirs(path)
         return path
 
-    def _setBaseFolder(self, cmdlineBase: str | None) -> None:
-        if cmdlineBase:
-            self.base = os.path.abspath(cmdlineBase)
-        elif os.environ.get("ANKI_BASE"):
-            self.base = os.path.abspath(os.environ["ANKI_BASE"])
-        else:
-            self.base = self._defaultBase()
-        self.ensureBaseExists()
+    @staticmethod
+    def get_created_base_folder(path_override: str | None) -> Path:
+        "Create the base folder and return it, using provided path or default."
+        path = Path(
+            path_override
+            or os.environ.get("ANKI_BASE")
+            or ProfileManager._default_base()
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
 
-    def _defaultBase(self) -> str:
+    @staticmethod
+    def _default_base() -> str:
         if is_win:
             from aqt.winpaths import get_appdata
 
@@ -478,7 +489,11 @@ create table if not exists profiles
     ######################################################################
 
     def _gldriver_path(self) -> str:
-        return os.path.join(self.base, "gldriver")
+        if qtmajor < 6:
+            fname = "gldriver"
+        else:
+            fname = "gldriver6"
+        return os.path.join(self.base, fname)
 
     def video_driver(self) -> VideoDriver:
         path = self._gldriver_path()
@@ -506,17 +521,69 @@ create table if not exists profiles
     def setUiScale(self, scale: float) -> None:
         self.meta["uiScale"] = scale
 
+    def reduce_motion(self) -> bool:
+        return self.meta.get("reduce_motion", True)
+
+    def set_reduce_motion(self, on: bool) -> None:
+        self.meta["reduce_motion"] = on
+        gui_hooks.body_classes_need_update()
+
+    def minimalist_mode(self) -> bool:
+        return self.meta.get("minimalist_mode", False)
+
+    def set_minimalist_mode(self, on: bool) -> None:
+        self.meta["minimalist_mode"] = on
+        gui_hooks.body_classes_need_update()
+
+    def spacebar_rates_card(self) -> bool:
+        return self.meta.get("spacebar_rates_card", True)
+
+    def set_spacebar_rates_card(self, on: bool) -> None:
+        self.meta["spacebar_rates_card"] = on
+
+    def get_answer_key(self, ease: int) -> Optional[str]:
+        return self.meta.setdefault("answer_keys", self.default_answer_keys).get(ease)
+
+    def set_answer_key(self, ease: int, key: str):
+        self.meta.setdefault("answer_keys", self.default_answer_keys)[ease] = key
+
+    def hide_top_bar(self) -> bool:
+        return self.meta.get("hide_top_bar", False)
+
+    def set_hide_top_bar(self, on: bool) -> None:
+        self.meta["hide_top_bar"] = on
+        gui_hooks.body_classes_need_update()
+
+    def top_bar_hide_mode(self) -> HideMode:
+        return self.meta.get("top_bar_hide_mode", HideMode.FULLSCREEN)
+
+    def set_top_bar_hide_mode(self, mode: HideMode) -> None:
+        self.meta["top_bar_hide_mode"] = mode
+        gui_hooks.body_classes_need_update()
+
+    def hide_bottom_bar(self) -> bool:
+        return self.meta.get("hide_bottom_bar", False)
+
+    def set_hide_bottom_bar(self, on: bool) -> None:
+        self.meta["hide_bottom_bar"] = on
+        gui_hooks.body_classes_need_update()
+
+    def bottom_bar_hide_mode(self) -> HideMode:
+        return self.meta.get("bottom_bar_hide_mode", HideMode.FULLSCREEN)
+
+    def set_bottom_bar_hide_mode(self, mode: HideMode) -> None:
+        self.meta["bottom_bar_hide_mode"] = mode
+        gui_hooks.body_classes_need_update()
+
     def last_addon_update_check(self) -> int:
         return self.meta.get("last_addon_update_check", 0)
 
     def set_last_addon_update_check(self, secs: int) -> None:
         self.meta["last_addon_update_check"] = secs
 
+    @deprecated(info="use theme_manager.night_mode")
     def night_mode(self) -> bool:
-        return self.meta.get("night_mode", False)
-
-    def set_night_mode(self, on: bool) -> None:
-        self.meta["night_mode"] = on
+        return theme_manager.night_mode
 
     def theme(self) -> Theme:
         return Theme(self.meta.get("theme", 0))
@@ -524,8 +591,49 @@ create table if not exists profiles
     def set_theme(self, theme: Theme) -> None:
         self.meta["theme"] = theme.value
 
-    def dark_mode_widgets(self) -> bool:
-        return self.meta.get("dark_mode_widgets", False)
+    def set_widget_style(self, style: WidgetStyle) -> None:
+        self.meta["widget_style"] = style
+        theme_manager.apply_style()
+
+    def get_widget_style(self) -> WidgetStyle:
+        return self.meta.get(
+            "widget_style", WidgetStyle.NATIVE if is_mac else WidgetStyle.ANKI
+        )
+
+    def browser_layout(self) -> BrowserLayout:
+        from aqt.browser.layout import BrowserLayout
+
+        return BrowserLayout(self.meta.get("browser_layout", "auto"))
+
+    def set_browser_layout(self, layout: BrowserLayout) -> None:
+        self.meta["browser_layout"] = layout.value
+
+    def editor_key(self, mode: EditorMode) -> str:
+        from aqt.editor import EditorMode
+
+        return {
+            EditorMode.ADD_CARDS: "add",
+            EditorMode.BROWSER: "browser",
+            EditorMode.EDIT_CURRENT: "current",
+        }[mode]
+
+    def tags_collapsed(self, mode: EditorMode) -> bool:
+        return self.meta.get(f"{self.editor_key(mode)}TagsCollapsed", False)
+
+    def set_tags_collapsed(self, mode: EditorMode, collapsed: bool) -> None:
+        self.meta[f"{self.editor_key(mode)}TagsCollapsed"] = collapsed
+
+    def legacy_import_export(self) -> bool:
+        return self.meta.get("legacy_import", False)
+
+    def set_legacy_import_export(self, enabled: bool) -> None:
+        self.meta["legacy_import"] = enabled
+
+    def last_loaded_profile_name(self) -> str | None:
+        return self.meta.get("last_loaded_profile_name")
+
+    def set_last_loaded_profile_name(self, name: str) -> None:
+        self.meta["last_loaded_profile_name"] = name
 
     # Profile-specific
     ######################################################################
@@ -540,21 +648,44 @@ create table if not exists profiles
         self.profile["hostNum"] = val or 0
 
     def media_syncing_enabled(self) -> bool:
-        return self.profile["syncMedia"]
+        return self.profile.get("syncMedia", True)
 
     def auto_syncing_enabled(self) -> bool:
-        return self.profile["autoSync"]
+        return self.profile.get("autoSync", True)
 
     def sync_auth(self) -> SyncAuth | None:
-        hkey = self.profile.get("syncKey")
-        if not hkey:
+        if not (hkey := self.profile.get("syncKey")):
             return None
-        return SyncAuth(hkey=hkey, host_number=self.profile.get("hostNum", 0))
+        return SyncAuth(
+            hkey=hkey,
+            endpoint=self.sync_endpoint(),
+            io_timeout_secs=self.network_timeout(),
+        )
 
     def clear_sync_auth(self) -> None:
-        self.profile["syncKey"] = None
-        self.profile["syncUser"] = None
-        self.profile["hostNum"] = 0
+        self.set_sync_key(None)
+        self.set_sync_username(None)
+        self.set_host_number(None)
+        self.set_current_sync_url(None)
+
+    def sync_endpoint(self) -> str | None:
+        return self._current_sync_url() or self.custom_sync_url() or None
+
+    def _current_sync_url(self) -> str | None:
+        """The last endpoint the server redirected us to."""
+        return self.profile.get("currentSyncUrl")
+
+    def set_current_sync_url(self, url: str | None) -> None:
+        self.profile["currentSyncUrl"] = url
+
+    def custom_sync_url(self) -> str | None:
+        """A custom server provided by the user."""
+        return self.profile.get("customSyncUrl")
+
+    def set_custom_sync_url(self, url: str | None) -> None:
+        if url != self.custom_sync_url():
+            self.set_current_sync_url(None)
+            self.profile["customSyncUrl"] = url
 
     def auto_sync_media_minutes(self) -> int:
         return self.profile.get("autoSyncMediaMinutes", 15)
@@ -567,3 +698,9 @@ create table if not exists profiles
 
     def set_show_browser_table_tooltips(self, val: bool) -> None:
         self.profile["browserTableTooltips"] = val
+
+    def set_network_timeout(self, timeout_secs: int) -> None:
+        self.profile["networkTimeout"] = timeout_secs
+
+    def network_timeout(self) -> int:
+        return self.profile.get("networkTimeout") or 30

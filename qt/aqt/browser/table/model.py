@@ -6,11 +6,12 @@ import time
 from typing import Any, Callable, Sequence
 
 import aqt
+import aqt.browser
 from anki.cards import Card, CardId
 from anki.collection import BrowserColumns as Columns
 from anki.collection import Collection
 from anki.consts import *
-from anki.errors import NotFoundError
+from anki.errors import BackendError, NotFoundError
 from anki.notes import Note, NoteId
 from aqt import gui_hooks
 from aqt.browser.table import Cell, CellRow, Column, ItemId, SearchContext
@@ -33,12 +34,13 @@ class DataModel(QAbstractTableModel):
 
     def __init__(
         self,
+        parent: QObject,
         col: Collection,
         state: ItemState,
         row_state_will_change_callback: Callable,
         row_state_changed_callback: Callable,
     ) -> None:
-        QAbstractTableModel.__init__(self)
+        super().__init__(parent)
         self.col: Collection = col
         self.columns: dict[str, Column] = {
             c.key: c for c in self.col.all_browser_columns()
@@ -85,24 +87,26 @@ class DataModel(QAbstractTableModel):
         # row state has changed if existence of cached and fetched counterparts differ
         # if the row was previously uncached, it is assumed to have existed
         state_change = (
-            new_row.is_deleted
+            new_row.is_disabled
             if old_row is None
-            else old_row.is_deleted != new_row.is_deleted
+            else old_row.is_disabled != new_row.is_disabled
         )
         if state_change:
-            self._on_row_state_will_change(index, not new_row.is_deleted)
+            self._on_row_state_will_change(index, not new_row.is_disabled)
         self._rows[item] = new_row
         if state_change:
-            self._on_row_state_changed(index, not new_row.is_deleted)
+            self._on_row_state_changed(index, not new_row.is_disabled)
         return self._rows[item]
 
     def _fetch_row_from_backend(self, item: ItemId) -> CellRow:
         try:
             row = CellRow(*self.col.browser_row_for_id(item))
-        except NotFoundError:
-            return CellRow.deleted(self.len_columns())
+        except BackendError as e:
+            return CellRow.disabled(self.len_columns(), str(e))
         except Exception as e:
-            return CellRow.generic(self.len_columns(), str(e))
+            return CellRow.disabled(
+                self.len_columns(), tr.errors_please_check_database()
+            )
         except BaseException as e:
             # fatal error like a panic in the backend - dump it to the
             # console so it gets picked up by the error handler
@@ -212,10 +216,14 @@ class DataModel(QAbstractTableModel):
         """Try to return the indicated, possibly deleted card."""
         if not index.isValid():
             return None
+        # The browser code will be calling .note() on the returned card, but
+        # the note might have been be deleted while the card still exists.
         try:
-            return self._state.get_card(self.get_item(index))
+            card = self._state.get_card(self.get_item(index))
+            card.note()
         except NotFoundError:
             return None
+        return card
 
     def get_note(self, index: QModelIndex) -> Note | None:
         """Try to return the indicated, possibly deleted note."""
@@ -230,9 +238,16 @@ class DataModel(QAbstractTableModel):
     ######################################################################
 
     def toggle_state(self, context: SearchContext) -> ItemState:
-        self.beginResetModel()
+        self.begin_reset()
         self._state = self._state.toggle_state()
-        self.search(context)
+        try:
+            self._search_inner(context)
+        except:
+            # rollback to prevent inconsistent state
+            self._state = self._state.toggle_state()
+            raise
+        finally:
+            self.end_reset()
         return self._state
 
     # Rows
@@ -240,23 +255,26 @@ class DataModel(QAbstractTableModel):
     def search(self, context: SearchContext) -> None:
         self.begin_reset()
         try:
-            if context.order is True:
-                try:
-                    context.order = self.columns[self._state.sort_column]
-                except KeyError:
-                    # invalid sort column in config
-                    context.order = self.columns["noteCrt"]
-                context.reverse = self._state.sort_backwards
-            gui_hooks.browser_will_search(context)
-            if context.ids is None:
-                context.ids = self._state.find_items(
-                    context.search, context.order, context.reverse
-                )
-            gui_hooks.browser_did_search(context)
-            self._items = context.ids
-            self._rows = {}
+            self._search_inner(context)
         finally:
             self.end_reset()
+
+    def _search_inner(self, context: SearchContext) -> None:
+        if context.order is True:
+            try:
+                context.order = self.columns[self._state.sort_column]
+            except KeyError:
+                # invalid sort column in config
+                context.order = self.columns["noteCrt"]
+            context.reverse = self._state.sort_backwards
+        gui_hooks.browser_will_search(context)
+        if context.ids is None:
+            context.ids = self._state.find_items(
+                context.search, context.order, context.reverse
+            )
+        gui_hooks.browser_did_search(context)
+        self._items = context.ids
+        self._rows = {}
 
     def reverse(self) -> None:
         self.beginResetModel()
@@ -304,13 +322,15 @@ class DataModel(QAbstractTableModel):
             return 0
         return self.len_columns()
 
+    _QFont = without_qt5_compat_wrapper(QFont)
+
     def data(self, index: QModelIndex = QModelIndex(), role: int = 0) -> Any:
         if not index.isValid():
             return QVariant()
         if role == Qt.ItemDataRole.FontRole:
             if not self.column_at(index).uses_cell_font:
                 return QVariant()
-            qfont = QFont()
+            qfont = self._QFont()
             row = self.get_row(index)
             qfont.setFamily(row.font_name)
             qfont.setPixelSize(row.font_size)
@@ -319,7 +339,7 @@ class DataModel(QAbstractTableModel):
             align: Qt.AlignmentFlag | int = Qt.AlignmentFlag.AlignVCenter
             if self.column_at(index).alignment == Columns.ALIGNMENT_CENTER:
                 align |= Qt.AlignmentFlag.AlignHCenter
-            return align
+            return getattr(align, "value", align)
         elif role == Qt.ItemDataRole.DisplayRole:
             return self.get_cell(index).text
         elif role == Qt.ItemDataRole.ToolTipRole and self._want_tooltips:
@@ -339,7 +359,7 @@ class DataModel(QAbstractTableModel):
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         # shortcut for large selections (Ctrl+A) to avoid fetching large numbers of rows at once
         if row := self.get_cached_row(index):
-            if row.is_deleted:
+            if row.is_disabled:
                 return Qt.ItemFlag(Qt.ItemFlag.NoItemFlags)
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
@@ -352,7 +372,8 @@ def addon_column_fillin(key: str) -> Column:
         key=key,
         cards_mode_label=f"{tr.browsing_addon()} ({key})",
         notes_mode_label=f"{tr.browsing_addon()} ({key})",
-        sorting=Columns.SORTING_NONE,
+        sorting_cards=Columns.SORTING_NONE,
+        sorting_notes=Columns.SORTING_NONE,
         uses_cell_font=False,
         alignment=Columns.ALIGNMENT_CENTER,
     )

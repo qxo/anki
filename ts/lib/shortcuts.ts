@@ -1,16 +1,10 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import type { Modifier } from "./keys";
-
-import { registerPackage } from "./register-package";
-import {
-    modifiersToPlatformString,
-    keyToPlatformString,
-    checkModifiers,
-    checkIfInputKey,
-} from "./keys";
 import { on } from "./events";
+import type { Modifier } from "./keys";
+import { checkIfModifierKey, checkModifiers, keyToPlatformString, modifiersToPlatformString } from "./keys";
+import { registerPackage } from "./runtime-require";
 
 const keyCodeLookup = {
     Backspace: 8,
@@ -65,7 +59,9 @@ export function getPlatformString(keyCombinationString: string): string {
 }
 
 function checkKey(event: KeyboardEvent, key: number): boolean {
-    return event.which === key;
+    // avoid deprecation warning
+    const which = event["which" + ""];
+    return which === key;
 }
 
 function partition<T>(predicate: (t: T) => boolean, items: T[]): [T[], T[]] {
@@ -100,8 +96,8 @@ const check =
     (keyCode: number, requiredModifiers: Modifier[], optionalModifiers: Modifier[]) =>
     (event: KeyboardEvent): boolean => {
         return (
-            checkKey(event, keyCode) &&
-            checkModifiers(requiredModifiers, optionalModifiers)(event)
+            checkKey(event, keyCode)
+            && checkModifiers(requiredModifiers, optionalModifiers)(event)
         );
     };
 
@@ -136,20 +132,36 @@ function innerShortcut(
     function handler(event: KeyboardEvent): void {
         if (nextCheck(event)) {
             innerShortcut(target, event, callback, ...restChecks);
-        } else if (checkIfInputKey(event)) {
+        } else if (!checkIfModifierKey(event)) {
             // Any non-modifier key will cancel the shortcut sequence
             remove();
         }
     }
 }
 
+export interface RegisterShortcutRestParams {
+    target: EventTarget;
+    /** There might be no good reason to use `keyup` other
+    than to circumvent Qt bugs */
+    event: "keydown" | "keyup";
+}
+
+const defaultRegisterShortcutRestParams = {
+    target: document,
+    event: "keydown" as const,
+};
+
 export function registerShortcut(
     callback: (event: KeyboardEvent) => void,
     keyCombinationString: string,
-    target: EventTarget | Document = document,
+    restParams: Partial<RegisterShortcutRestParams> = defaultRegisterShortcutRestParams,
 ): () => void {
-    const [check, ...restChecks] =
-        splitKeyCombinationString(keyCombinationString).map(keyCombinationToCheck);
+    const {
+        target = defaultRegisterShortcutRestParams.target,
+        event = defaultRegisterShortcutRestParams.event,
+    } = restParams;
+
+    const [check, ...restChecks] = splitKeyCombinationString(keyCombinationString).map(keyCombinationToCheck);
 
     function handler(event: KeyboardEvent): void {
         if (check(event)) {
@@ -157,7 +169,7 @@ export function registerShortcut(
         }
     }
 
-    return on(target, "keydown", handler);
+    return on(target, event, handler);
 }
 
 registerPackage("anki/shortcuts", {

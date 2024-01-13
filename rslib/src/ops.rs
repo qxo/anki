@@ -3,7 +3,7 @@
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Custom(String),
     AddDeck,
@@ -14,8 +14,11 @@ pub enum Op {
     Bury,
     ChangeNotetype,
     ClearUnusedTags,
+    CreateCustomStudy,
     EmptyFilteredDeck,
     FindAndReplace,
+    ImageOcclusion,
+    Import,
     RebuildFilteredDeck,
     RemoveDeck,
     RemoveNote,
@@ -53,6 +56,8 @@ impl Op {
             Op::AddNote => tr.actions_add_note(),
             Op::AnswerCard => tr.actions_answer_card(),
             Op::Bury => tr.studying_bury(),
+            Op::CreateCustomStudy => tr.actions_custom_study(),
+            Op::Import => tr.actions_import(),
             Op::RemoveDeck => tr.decks_delete_deck(),
             Op::RemoveNote => tr.studying_delete_note(),
             Op::RenameDeck => tr.actions_rename_deck(),
@@ -86,12 +91,13 @@ impl Op {
             Op::Custom(name) => name.into(),
             Op::ChangeNotetype => tr.browsing_change_notetype(),
             Op::SkipUndo => return "".to_string(),
+            Op::ImageOcclusion => tr.notetypes_image_occlusion_name(),
         }
         .into()
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct StateChanges {
     pub card: bool,
     pub note: bool,
@@ -103,12 +109,13 @@ pub struct StateChanges {
     pub mtime: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct OpChanges {
     pub op: Op,
     pub changes: StateChanges,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct OpOutput<T> {
     pub output: T,
     pub changes: OpChanges,
@@ -154,9 +161,13 @@ impl OpChanges {
 
     pub fn requires_study_queue_rebuild(&self) -> bool {
         let c = &self.changes;
-        c.card
+        (c.card && self.op != Op::SetFlag)
             || c.deck
-            || (c.config && matches!(self.op, Op::SetCurrentDeck | Op::UpdatePreferences))
+            || (c.config
+                && matches!(
+                    self.op,
+                    Op::SetCurrentDeck | Op::UpdatePreferences | Op::UpdateDeckConfig
+                ))
             || c.deck_config
     }
 }

@@ -1,26 +1,31 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+mod service;
 pub(crate) mod undo;
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
+use fsrs::MemoryState;
 use num_enum::TryFromPrimitive;
-use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_repr::Deserialize_repr;
+use serde_repr::Serialize_repr;
 
-use crate::{
-    collection::Collection,
-    config::SchedulerVersion,
-    deckconfig::DeckConfig,
-    decks::DeckId,
-    define_newtype,
-    error::{AnkiError, FilteredDeckError, Result},
-    notes::NoteId,
-    ops::StateChanges,
-    prelude::*,
-    timestamp::TimestampSecs,
-    types::Usn,
-};
+use crate::collection::Collection;
+use crate::config::SchedulerVersion;
+use crate::deckconfig::DeckConfig;
+use crate::decks::DeckId;
+use crate::define_newtype;
+use crate::error::AnkiError;
+use crate::error::FilteredDeckError;
+use crate::error::Result;
+use crate::notes::NoteId;
+use crate::ops::StateChanges;
+use crate::prelude::*;
+use crate::timestamp::TimestampSecs;
+use crate::types::Usn;
 
 define_newtype!(CardId, i64);
 
@@ -30,7 +35,7 @@ impl CardId {
     }
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum CardType {
     New = 0,
@@ -39,7 +44,7 @@ pub enum CardType {
     Relearn = 3,
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, TryFromPrimitive, Clone, Copy)]
 #[repr(i8)]
 pub enum CardQueue {
     /// due is the order cards are shown in
@@ -56,6 +61,15 @@ pub enum CardQueue {
     Suspended = -1,
     SchedBuried = -2,
     UserBuried = -3,
+}
+
+/// Which of the blue/red/green numbers this card maps to.
+pub enum CardQueueNumber {
+    New,
+    Learning,
+    Review,
+    /// Suspended/buried cards should not be included.
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +91,35 @@ pub struct Card {
     pub(crate) original_due: i32,
     pub(crate) original_deck_id: DeckId,
     pub(crate) flags: u8,
-    pub(crate) data: String,
+    /// The position in the new queue before leaving it.
+    pub(crate) original_position: Option<u32>,
+    pub(crate) memory_state: Option<FsrsMemoryState>,
+    pub(crate) desired_retention: Option<f32>,
+    /// JSON object or empty; exposed through the reviewer for persisting custom
+    /// state
+    pub(crate) custom_data: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FsrsMemoryState {
+    /// The expected memory stability, in days.
+    pub stability: f32,
+    /// A number in the range 1.0-10.0. Use difficulty() for a normalized
+    /// number.
+    pub difficulty: f32,
+}
+
+impl FsrsMemoryState {
+    /// Returns the difficulty normalized to a 0.0-1.0 range.
+    pub(crate) fn difficulty(&self) -> f32 {
+        (self.difficulty - 1.0) / 9.0
+    }
+
+    /// Returns the difficulty normalized to a 0.1-1.1 range,
+    /// which is used in revlog entries.
+    pub(crate) fn difficulty_shifted(&self) -> f32 {
+        self.difficulty() + 0.1
+    }
 }
 
 impl Default for Card {
@@ -100,20 +142,51 @@ impl Default for Card {
             original_due: 0,
             original_deck_id: DeckId(0),
             flags: 0,
-            data: "".to_string(),
+            original_position: None,
+            memory_state: None,
+            desired_retention: None,
+            custom_data: String::new(),
         }
     }
 }
 
 impl Card {
+    pub fn id(&self) -> CardId {
+        self.id
+    }
+
+    pub fn note_id(&self) -> NoteId {
+        self.note_id
+    }
+
+    pub fn deck_id(&self) -> DeckId {
+        self.deck_id
+    }
+
+    pub fn template_idx(&self) -> u16 {
+        self.template_idx
+    }
+
+    pub fn queue_number(&self) -> CardQueueNumber {
+        match self.queue {
+            CardQueue::New => CardQueueNumber::New,
+            CardQueue::PreviewRepeat | CardQueue::Learn => CardQueueNumber::Learning,
+            CardQueue::DayLearn | CardQueue::Review => CardQueueNumber::Review,
+            CardQueue::Suspended | CardQueue::SchedBuried | CardQueue::UserBuried => {
+                CardQueueNumber::Invalid
+            }
+        }
+    }
+
     pub fn set_modified(&mut self, usn: Usn) {
         self.mtime = TimestampSecs::now();
         self.usn = usn;
     }
 
     /// Caller must ensure provided deck exists and is not filtered.
-    fn set_deck(&mut self, deck: DeckId, sched: SchedulerVersion) {
-        self.remove_from_filtered_deck_restoring_queue(sched);
+    fn set_deck(&mut self, deck: DeckId) {
+        self.remove_from_filtered_deck_restoring_queue();
+        self.memory_state = None;
         self.deck_id = deck;
     }
 
@@ -141,12 +214,13 @@ impl Card {
         (self.ease_factor as f32) / 1000.0
     }
 
+    /// Don't use this in situations where you may be using original_due, since
+    /// it only applies to the current due date. You may want to use
+    /// is_unix_epoch_timestap() instead.
     pub fn is_intraday_learning(&self) -> bool {
         matches!(self.queue, CardQueue::Learn | CardQueue::PreviewRepeat)
     }
-}
 
-impl Card {
     pub fn new(note_id: NoteId, template_idx: u16, deck_id: DeckId, due: i32) -> Self {
         Card {
             note_id,
@@ -155,6 +229,35 @@ impl Card {
             due,
             ..Default::default()
         }
+    }
+
+    /// Remaining steps after configured steps have changed, disregarding
+    /// "remaining today". [None] if same as before. A step counts as
+    /// remaining if the card has not passed a step with the same or a
+    /// greater delay, but output will be at least 1.
+    fn new_remaining_steps(&self, new_steps: &[f32], old_steps: &[f32]) -> Option<u32> {
+        let remaining = self.remaining_steps();
+        let new_remaining = old_steps
+            .len()
+            .checked_sub(remaining as usize + 1)
+            .and_then(|last_index| {
+                new_steps
+                    .iter()
+                    .rev()
+                    .position(|&step| step <= old_steps[last_index])
+            })
+            // no last delay or last delay is less than all new steps → all steps remain
+            .unwrap_or(new_steps.len())
+            // (re)learning card must have at least 1 step remaining
+            .max(1) as u32;
+        (remaining != new_remaining).then_some(new_remaining)
+    }
+
+    /// Supposedly unique across all reviews in the collection.
+    pub fn review_seed(&self) -> u64 {
+        (self.id.0 as u64)
+            .rotate_left(8)
+            .wrapping_add(self.reps as u64)
     }
 }
 
@@ -167,7 +270,7 @@ impl Collection {
         if undoable {
             self.transact(Op::UpdateCard, |col| {
                 for mut card in cards {
-                    let existing = col.storage.get_card(card.id)?.ok_or(AnkiError::NotFound)?;
+                    let existing = col.storage.get_card(card.id)?.or_not_found(card.id)?;
                     col.update_card_inner(&mut card, existing, col.usn()?)?
                 }
                 Ok(())
@@ -175,7 +278,7 @@ impl Collection {
         } else {
             self.transact_no_undo(|col| {
                 for mut card in cards {
-                    let existing = col.storage.get_card(card.id)?.ok_or(AnkiError::NotFound)?;
+                    let existing = col.storage.get_card(card.id)?.or_not_found(card.id)?;
                     col.update_card_inner(&mut card, existing, col.usn()?)?;
                 }
                 Ok(OpOutput {
@@ -197,10 +300,7 @@ impl Collection {
     where
         F: FnOnce(&mut Card) -> Result<T>,
     {
-        let orig = self
-            .storage
-            .get_card(cid)?
-            .ok_or_else(|| AnkiError::invalid_input("no such card"))?;
+        let orig = self.storage.get_card(cid)?.or_invalid("no such card")?;
         let mut card = orig.clone();
         func(&mut card)?;
         self.update_card_inner(&mut card, orig, self.usn()?)?;
@@ -219,9 +319,7 @@ impl Collection {
     }
 
     pub(crate) fn add_card(&mut self, card: &mut Card) -> Result<()> {
-        if card.id.0 != 0 {
-            return Err(AnkiError::invalid_input("card id already set"));
-        }
+        require!(card.id.0 == 0, "card id already set");
         card.mtime = TimestampSecs::now();
         card.usn = self.usn()?;
         self.add_card_undoable(card)
@@ -248,22 +346,27 @@ impl Collection {
     }
 
     pub fn set_deck(&mut self, cards: &[CardId], deck_id: DeckId) -> Result<OpOutput<usize>> {
-        let deck = self.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?;
-        if deck.is_filtered() {
-            return Err(FilteredDeckError::CanNotMoveCardsInto.into());
-        }
-        self.storage.set_search_table_to_card_ids(cards, false)?;
         let sched = self.scheduler_version();
+        if sched == SchedulerVersion::V1 {
+            return Err(AnkiError::SchedulerUpgradeRequired);
+        }
+        let deck = self.get_deck(deck_id)?.or_not_found(deck_id)?;
+        let config_id = deck.config_id().ok_or(AnkiError::FilteredDeckError {
+            source: FilteredDeckError::CanNotMoveCardsInto,
+        })?;
+        let config = self.get_deck_config(config_id, true)?.unwrap();
+        let mut steps_adjuster = RemainingStepsAdjuster::new(&config);
         let usn = self.usn()?;
         self.transact(Op::SetCardDeck, |col| {
             let mut count = 0;
-            for mut card in col.storage.all_searched_cards()? {
+            for mut card in col.all_cards_for_ids(cards, false)? {
                 if card.deck_id == deck_id {
                     continue;
                 }
                 count += 1;
                 let original = card.clone();
-                card.set_deck(deck_id, sched);
+                steps_adjuster.adjust_remaining_steps(col, &mut card)?;
+                card.set_deck(deck_id);
                 col.update_card_inner(&mut card, original, usn)?;
             }
             Ok(count)
@@ -271,19 +374,19 @@ impl Collection {
     }
 
     pub fn set_card_flag(&mut self, cards: &[CardId], flag: u32) -> Result<OpOutput<usize>> {
-        if flag > 7 {
-            return Err(AnkiError::invalid_input("invalid flag"));
-        }
+        require!(flag < 8, "invalid flag");
         let flag = flag as u8;
 
-        self.storage.set_search_table_to_card_ids(cards, false)?;
         let usn = self.usn()?;
         self.transact(Op::SetFlag, |col| {
             let mut count = 0;
-            for mut card in col.storage.all_searched_cards()? {
+            for mut card in col.all_cards_for_ids(cards, false)? {
                 let original = card.clone();
                 if card.set_flag(flag) {
-                    col.update_card_inner(&mut card, original, usn)?;
+                    // To avoid having to rebuild the study queues, we mark the card as requiring
+                    // a sync, but do not change its modification time.
+                    card.usn = usn;
+                    col.update_card_undoable(&mut card, original)?;
                     count += 1;
                 }
             }
@@ -301,5 +404,113 @@ impl Collection {
         }
 
         Ok(DeckConfig::default())
+    }
+
+    /// Adjust the remaining steps of the card according to the steps change.
+    /// Steps must be learning or relearning steps according to the card's type.
+    pub(crate) fn adjust_remaining_steps(
+        &mut self,
+        card: &mut Card,
+        old_steps: &[f32],
+        new_steps: &[f32],
+        usn: Usn,
+    ) -> Result<()> {
+        if let Some(new_remaining) = card.new_remaining_steps(new_steps, old_steps) {
+            let original = card.clone();
+            card.remaining_steps = new_remaining;
+            self.update_card_inner(card, original, usn)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Adjusts the remaining steps of cards after their deck config has changed.
+struct RemainingStepsAdjuster<'a> {
+    learn_steps: &'a [f32],
+    relearn_steps: &'a [f32],
+    configs: HashMap<DeckId, DeckConfig>,
+}
+
+impl<'a> RemainingStepsAdjuster<'a> {
+    fn new(new_config: &'a DeckConfig) -> Self {
+        RemainingStepsAdjuster {
+            learn_steps: &new_config.inner.learn_steps,
+            relearn_steps: &new_config.inner.relearn_steps,
+            configs: HashMap::new(),
+        }
+    }
+
+    fn adjust_remaining_steps(&mut self, col: &mut Collection, card: &mut Card) -> Result<()> {
+        if let Some(remaining) = match card.ctype {
+            CardType::Learn => card.new_remaining_steps(
+                self.learn_steps,
+                &self.config_for_card(col, card)?.inner.learn_steps,
+            ),
+            CardType::Relearn => card.new_remaining_steps(
+                self.relearn_steps,
+                &self.config_for_card(col, card)?.inner.relearn_steps,
+            ),
+            _ => None,
+        } {
+            card.remaining_steps = remaining;
+        }
+        Ok(())
+    }
+
+    fn config_for_card(&mut self, col: &mut Collection, card: &Card) -> Result<&mut DeckConfig> {
+        Ok(
+            match self.configs.entry(card.original_or_current_deck_id()) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(col.deck_config_for_card(card)?),
+            },
+        )
+    }
+}
+
+impl From<FsrsMemoryState> for MemoryState {
+    fn from(value: FsrsMemoryState) -> Self {
+        MemoryState {
+            stability: value.stability,
+            difficulty: value.difficulty,
+        }
+    }
+}
+
+impl From<MemoryState> for FsrsMemoryState {
+    fn from(value: MemoryState) -> Self {
+        FsrsMemoryState {
+            stability: value.stability,
+            difficulty: value.difficulty,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tests::open_test_collection_with_learning_card;
+    use crate::tests::open_test_collection_with_relearning_card;
+    use crate::tests::DeckAdder;
+
+    #[test]
+    fn should_increase_remaining_learning_steps_if_new_deck_has_more_unpassed_ones() {
+        let mut col = open_test_collection_with_learning_card();
+        let deck = DeckAdder::new("target")
+            .with_config(|config| config.inner.learn_steps.push(100.))
+            .add(&mut col);
+        let card_id = col.get_first_card().id;
+        col.set_deck(&[card_id], deck.id).unwrap();
+        assert_eq!(col.get_first_card().remaining_steps, 3);
+    }
+
+    #[test]
+    fn should_increase_remaining_relearning_steps_if_new_deck_has_more_unpassed_ones() {
+        let mut col = open_test_collection_with_relearning_card();
+        let deck = DeckAdder::new("target")
+            .with_config(|config| config.inner.relearn_steps.push(100.))
+            .add(&mut col);
+        let card_id = col.get_first_card().id;
+        col.set_deck(&[card_id], deck.id).unwrap();
+        assert_eq!(col.get_first_card().remaining_steps, 2);
     }
 }

@@ -3,23 +3,24 @@
     License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import Row from "../components/Row.svelte";
     import Col from "../components/Col.svelte";
-    import TooltipLabel from "./TooltipLabel.svelte";
+    import ConfigInput from "../components/ConfigInput.svelte";
+    import RevertButton from "../components/RevertButton.svelte";
+    import Row from "../components/Row.svelte";
     import StepsInput from "./StepsInput.svelte";
-    import RevertButton from "./RevertButton.svelte";
 
     export let value: any;
     export let defaultValue: any;
-    export let markdownTooltip: string;
 </script>
 
-<Row --cols={12}>
-    <Col --col-size={7} breakpoint="sm">
-        <TooltipLabel {markdownTooltip}><slot /></TooltipLabel>
+<Row --cols={13}>
+    <Col --col-size={7} breakpoint="xs">
+        <slot />
     </Col>
-    <Col --col-size={5} breakpoint="sm">
-        <StepsInput bind:value />
-        <RevertButton bind:value {defaultValue} />
+    <Col --col-size={6} breakpoint="xs">
+        <ConfigInput>
+            <StepsInput bind:value />
+            <RevertButton slot="revert" bind:value {defaultValue} />
+        </ConfigInput>
     </Col>
 </Row>

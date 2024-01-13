@@ -18,12 +18,6 @@ from hookslib import Hook, write_file
 ######################################################################
 
 hooks = [
-    Hook(
-        name="card_did_leech",
-        args=["card: Card"],
-        legacy_hook="leech",
-        doc="Called by v1/v2 scheduler when a card is marked as a leech.",
-    ),
     Hook(name="card_odue_was_invalid"),
     Hook(name="schema_will_change", args=["proceed: bool"], return_type="bool"),
     Hook(
@@ -31,7 +25,30 @@ hooks = [
         args=["col: anki.collection.Collection", "ids: Sequence[anki.notes.NoteId]"],
         legacy_hook="remNotes",
     ),
-    Hook(name="media_files_did_export", args=["count: int"]),
+    Hook(
+        name="note_will_be_added",
+        args=[
+            "col: anki.collection.Collection",
+            "note: anki.notes.Note",
+            "deck_id: anki.decks.DeckId",
+        ],
+        doc="""Allows modifying a note before it's added to the collection.
+
+        This hook may be called both when users use the Add screen, and when
+        add-ons like AnkiConnect add notes. It is not called when importing. If
+        you wish to alter the Add screen, use gui_hooks.add_cards_will_add_note
+        instead.""",
+    ),
+    Hook(
+        name="media_files_did_export",
+        args=["count: int"],
+        doc="Only used by legacy .apkg exporter. Will be deprecated in the future.",
+    ),
+    Hook(
+        name="legacy_export_progress",
+        args=["progress: str"],
+        doc="Temporary hook used in transition to new import/export code.",
+    ),
     Hook(
         name="exporters_list_created",
         args=["exporters: list[tuple[str, Any]]"],
@@ -74,24 +91,6 @@ hooks = [
             "ctx: anki.template.TemplateRenderContext",
         ],
         doc="Can modify the resulting text after rendering completes.",
-    ),
-    Hook(
-        name="schedv2_did_answer_review_card",
-        args=["card: anki.cards.Card", "ease: int", "early: bool"],
-    ),
-    Hook(
-        name="scheduler_new_limit_for_single_deck",
-        args=["count: int", "deck: anki.decks.DeckDict"],
-        return_type="int",
-        doc="""Allows changing the number of new card for this deck (without
-        considering descendants).""",
-    ),
-    Hook(
-        name="scheduler_review_limit_for_single_deck",
-        args=["count: int", "deck: anki.decks.DeckDict"],
-        return_type="int",
-        doc="""Allows changing the number of rev card for this deck (without
-        considering descendants).""",
     ),
     Hook(
         name="importing_importers",

@@ -6,6 +6,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 
 import aqt
+import aqt.main
 from aqt.qt import *
 from aqt.utils import showText, tooltip
 
@@ -31,6 +32,10 @@ def check_db(mw: aqt.AnkiQt) -> None:
     qconnect(timer.timeout, on_timer)
     timer.start(100)
 
+    def do_check() -> tuple[str, bool]:
+        mw.create_backup_now()
+        return mw.col.fix_integrity()
+
     def on_future_done(fut: Future) -> None:
         timer.stop()
         ret, ok = fut.result()
@@ -53,4 +58,4 @@ def check_db(mw: aqt.AnkiQt) -> None:
                 n += 1
                 continue
 
-    mw.taskman.with_progress(mw.col.fix_integrity, on_future_done)
+    mw.taskman.with_progress(do_check, on_future_done)

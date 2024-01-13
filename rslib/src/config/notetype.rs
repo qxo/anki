@@ -4,7 +4,8 @@
 use strum::IntoStaticStr;
 
 use super::ConfigKey;
-use crate::{notetype::NotetypeKind, prelude::*};
+use crate::notetype::NotetypeKind;
+use crate::prelude::*;
 
 /// Notetype config packed into a collection config key. This may change
 /// frequently, and we want to avoid the potentially expensive notetype
@@ -23,7 +24,7 @@ impl Collection {
         card_ordinal: usize,
         key: &str,
     ) -> Result<String> {
-        let nt = self.get_notetype(ntid)?.ok_or(AnkiError::NotFound)?;
+        let nt = self.get_notetype(ntid)?.or_not_found(ntid)?;
         let ordinal = if matches!(nt.config.kind(), NotetypeKind::Cloze) {
             0
         } else {

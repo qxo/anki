@@ -6,7 +6,11 @@ import time
 from typing import Any
 
 import aqt
+import aqt.forms
+import aqt.main
+from anki.decks import DeckId
 from aqt import gui_hooks
+from aqt.operations.deck import set_current_deck
 from aqt.qt import *
 from aqt.theme import theme_manager
 from aqt.utils import (
@@ -19,6 +23,7 @@ from aqt.utils import (
     tooltip,
     tr,
 )
+from aqt.webview import AnkiWebViewKind
 
 
 class NewDeckStats(QDialog):
@@ -39,21 +44,37 @@ class NewDeckStats(QDialog):
         f.setupUi(self)
         f.groupBox.setVisible(False)
         f.groupBox_2.setVisible(False)
-        restoreGeom(self, self.name)
+        if not is_mac:
+            f.horizontalLayout_4.setContentsMargins(0, 0, 0, 0)
+        restoreGeom(self, self.name, default_size=(800, 800))
+
+        from aqt.deckchooser import DeckChooser
+
+        self.deck_chooser = DeckChooser(
+            self.mw,
+            f.deckArea,
+            on_deck_changed=self.on_deck_changed,
+        )
+
         b = f.buttonBox.addButton(
             tr.statistics_save_pdf(), QDialogButtonBox.ButtonRole.ActionRole
         )
         qconnect(b.clicked, self.saveImage)
         b.setAutoDefault(False)
+        b = f.buttonBox.button(QDialogButtonBox.StandardButton.Close)
+        b.setAutoDefault(False)
         maybeHideClose(self.form.buttonBox)
         addCloseShortcut(self)
         gui_hooks.stats_dialog_will_show(self)
+        self.form.web.set_kind(AnkiWebViewKind.DECK_STATS)
+        self.form.web.hide_while_preserving_layout()
         self.show()
         self.refresh()
         self.form.web.set_bridge_command(self._on_bridge_cmd, self)
         self.activateWindow()
 
     def reject(self) -> None:
+        self.deck_chooser.cleanup()
         self.form.web.cleanup()
         self.form.web = None
         saveGeom(self, self.name)
@@ -63,6 +84,11 @@ class NewDeckStats(QDialog):
     def closeWithCallback(self, callback: Callable[[], None]) -> None:
         self.reject()
         callback()
+
+    def on_deck_changed(self, deck_id: int) -> None:
+        set_current_deck(parent=self, deck_id=DeckId(deck_id)).success(
+            lambda _: self.refresh()
+        ).run_in_background()
 
     def _imagePath(self) -> str:
         name = time.strftime("-%Y-%m-%d@%H-%M-%S.pdf", time.localtime(time.time()))
@@ -81,8 +107,16 @@ class NewDeckStats(QDialog):
         path = self._imagePath()
         if not path:
             return
-        self.form.web.page().printToPdf(path)
-        tooltip(tr.statistics_saved())
+
+        # When scrolled down in dark mode, the top of the page in the
+        # final PDF will have a white background, making the text and graphs
+        # unreadable. A simple fix for now is to scroll to the top of the
+        # page first.
+        def after_scroll(arg: Any) -> None:
+            self.form.web.page().printToPdf(path)
+            tooltip(tr.statistics_saved())
+
+        self.form.web.evalWithCallback("window.scrollTo(0, 0);", after_scroll)
 
     # legacy add-ons
     def changePeriod(self, n: Any) -> None:
@@ -188,7 +222,7 @@ class DeckStats(QDialog):
         stats = self.mw.col.stats()
         stats.wholeCollection = self.wholeCollection
         self.report = stats.report(type=self.period)
-        self.form.web.set_title("deck stats")
+        self.form.web.set_kind(AnkiWebViewKind.LEGACY_DECK_STATS)
         self.form.web.stdHtml(
             f"<html><body>{self.report}</body></html>",
             js=["js/vendor/jquery.min.js", "js/vendor/plot.js"],

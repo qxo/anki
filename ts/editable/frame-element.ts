@@ -1,24 +1,14 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import {
-    nodeIsText,
-    nodeIsElement,
-    elementIsBlock,
-    hasBlockAttribute,
-} from "../lib/dom";
-import { on } from "../lib/events";
-import { getSelection } from "../lib/cross-browser";
+import { getSelection, isSelectionCollapsed } from "@tslib/cross-browser";
+import { elementIsBlock, hasBlockAttribute, nodeIsElement, nodeIsText } from "@tslib/dom";
+import { on } from "@tslib/events";
+
 import { moveChildOutOfElement } from "../domlib/move-nodes";
-import { placeCaretBefore, placeCaretAfter } from "../domlib/place-caret";
-import {
-    frameElementTagName,
-    isFrameHandle,
-    checkWhetherMovingIntoHandle,
-    FrameStart,
-    FrameEnd,
-} from "./frame-handle";
+import { placeCaretAfter, placeCaretBefore } from "../domlib/place-caret";
 import type { FrameHandle } from "./frame-handle";
+import { checkHandles, frameElementTagName, FrameEnd, FrameStart, isFrameHandle } from "./frame-handle";
 
 function restoreFrameHandles(mutations: MutationRecord[]): void {
     let referenceNode: Node | null = null;
@@ -27,48 +17,49 @@ function restoreFrameHandles(mutations: MutationRecord[]): void {
         const frameElement = mutation.target as FrameElement;
         const framed = frameElement.querySelector(frameElement.frames!) as HTMLElement;
 
+        if (!framed) {
+            frameElement.remove();
+            continue;
+        }
+
         for (const node of mutation.addedNodes) {
             if (node === framed || isFrameHandle(node)) {
                 continue;
             }
 
-            /**
-             * In some rare cases, nodes might be inserted into the frame itself.
-             * For example after using execCommand.
-             */
-            const placement = node.compareDocumentPosition(framed);
+            // In some rare cases, nodes might be inserted into the frame itself.
+            // For example after using execCommand.
+            const placement = framed.compareDocumentPosition(node);
 
-            if (placement & Node.DOCUMENT_POSITION_FOLLOWING) {
-                referenceNode = moveChildOutOfElement(frameElement, node, "afterend");
-                continue;
-            } else if (placement & Node.DOCUMENT_POSITION_PRECEDING) {
+            if (placement & Node.DOCUMENT_POSITION_PRECEDING) {
                 referenceNode = moveChildOutOfElement(
                     frameElement,
                     node,
                     "beforebegin",
                 );
-                continue;
+            } else if (placement & Node.DOCUMENT_POSITION_FOLLOWING) {
+                referenceNode = moveChildOutOfElement(frameElement, node, "afterend");
             }
         }
 
         for (const node of mutation.removedNodes) {
-            if (
-                /* avoid triggering when (un)mounting whole frame */
-                mutations.length === 1 &&
-                nodeIsElement(node) &&
-                isFrameHandle(node)
-            ) {
-                /* When deleting from _outer_ position in FrameHandle to _inner_ position */
-                frameElement.remove();
+            if (!isFrameHandle(node)) {
                 continue;
             }
 
             if (
-                nodeIsElement(node) &&
-                isFrameHandle(node) &&
-                frameElement.isConnected &&
-                !frameElement.block
+                /* avoid triggering when (un)mounting whole frame */
+                mutations.length === 1
+                && !node.partiallySelected
             ) {
+                // Similar to a "movein", this could be considered a
+                // "deletein" event and could get some special treatment, e.g.
+                // first highlight the entire frame-element.
+                frameElement.remove();
+                continue;
+            }
+
+            if (frameElement.isConnected && !frameElement.block) {
                 frameElement.refreshHandles();
                 continue;
             }
@@ -138,8 +129,8 @@ export class FrameElement extends HTMLElement {
         const handle = isFrameHandle(node)
             ? node
             : (document.createElement(
-                  start ? FrameStart.tagName : FrameEnd.tagName,
-              ) as FrameHandle);
+                start ? FrameStart.tagName : FrameEnd.tagName,
+            ) as FrameHandle);
 
         handle.dataset.frames = this.frames;
 
@@ -173,12 +164,16 @@ export class FrameElement extends HTMLElement {
     removeEnd?: () => void;
 
     addEventListeners(): void {
-        this.removeStart = on(this, "moveinstart" as keyof HTMLElementEventMap, () =>
-            this.framedElement?.dispatchEvent(new Event("moveinstart")),
+        this.removeStart = on(
+            this,
+            "moveinstart" as keyof HTMLElementEventMap,
+            () => this.framedElement?.dispatchEvent(new Event("moveinstart")),
         );
 
-        this.removeEnd = on(this, "moveinend" as keyof HTMLElementEventMap, () =>
-            this.framedElement?.dispatchEvent(new Event("moveinend")),
+        this.removeEnd = on(
+            this,
+            "moveinend" as keyof HTMLElementEventMap,
+            () => this.framedElement?.dispatchEvent(new Event("moveinend")),
         );
     }
 
@@ -205,25 +200,23 @@ export class FrameElement extends HTMLElement {
 
         if (offset === 0) {
             const previous = this.previousSibling;
-            const focus =
-                previous &&
-                (nodeIsText(previous) ||
-                    (nodeIsElement(previous) && !elementIsBlock(previous)))
-                    ? previous
-                    : this.insertAdjacentElement(
-                          "beforebegin",
-                          document.createElement("br"),
-                      );
+            const focus = previous
+                    && (nodeIsText(previous)
+                        || (nodeIsElement(previous) && !elementIsBlock(previous)))
+                ? previous
+                : this.insertAdjacentElement(
+                    "beforebegin",
+                    document.createElement("br"),
+                );
 
             placeCaretAfter(focus ?? this);
         } else if (offset === 1) {
             const next = this.nextSibling;
 
-            const focus =
-                next &&
-                (nodeIsText(next) || (nodeIsElement(next) && !elementIsBlock(next)))
-                    ? next
-                    : this.insertAdjacentElement("afterend", lineBreak);
+            const focus = next
+                    && (nodeIsText(next) || (nodeIsElement(next) && !elementIsBlock(next)))
+                ? next
+                : this.insertAdjacentElement("afterend", lineBreak);
 
             placeCaretBefore(focus ?? this);
         }
@@ -238,14 +231,17 @@ function checkIfInsertingLineBreakAdjacentToBlockFrame() {
 
         const selection = getSelection(frame)!;
 
-        if (selection.anchorNode === frame.framedElement && selection.isCollapsed) {
+        if (
+            selection.anchorNode === frame.framedElement
+            && isSelectionCollapsed(selection)
+        ) {
             frame.insertLineBreak(selection.anchorOffset);
         }
     }
 }
 
 function onSelectionChange() {
-    checkWhetherMovingIntoHandle();
+    checkHandles();
     checkIfInsertingLineBreakAdjacentToBlockFrame();
 }
 
@@ -256,7 +252,7 @@ document.addEventListener("selectionchange", onSelectionChange);
  * <anki-frame>
  *     <frame-handle-start> </frame-handle-start>
  *     <your-element ... />
- *     <frame-handle-end> </frame-handle-start>
+ *     <frame-handle-end> </frame-handle-end>
  * </anki-frame>
  */
 export function frameElement(element: HTMLElement, block: boolean): FrameElement {

@@ -3,6 +3,8 @@
 
 syntax = "proto3";
 
+option java_multiple_files = true;
+
 package anki.cards;
 
 import "anki/generic.proto";
@@ -15,6 +17,11 @@ service CardsService {
   rpc SetDeck(SetDeckRequest) returns (collection.OpChangesWithCount);
   rpc SetFlag(SetFlagRequest) returns (collection.OpChangesWithCount);
 }
+
+// Implicitly includes any of the above methods that are not listed in the
+// backend service.
+service BackendCardsService {}
+
 message CardId {
   int64 cid = 1;
 }
@@ -41,7 +48,15 @@ message Card {
   sint32 original_due = 15;
   int64 original_deck_id = 16;
   uint32 flags = 17;
-  string data = 18;
+  optional uint32 original_position = 18;
+  optional FsrsMemoryState memory_state = 20;
+  optional float desired_retention = 21;
+  string custom_data = 19;
+}
+
+message FsrsMemoryState {
+  float stability = 1;
+  float difficulty = 2;
 }
 
 message UpdateCardsRequest {

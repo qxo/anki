@@ -5,25 +5,16 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import type { Stats, Cards } from "../lib/proto";
-import {
-    extent,
-    histogram,
-    quantile,
-    sum,
-    mean,
-    scaleLinear,
-    scaleSequential,
-    interpolateBlues,
-} from "d3";
-import { localizedNumber } from "../lib/i18n";
+import type { GraphsResponse_Intervals } from "@tslib/anki/stats_pb";
+import * as tr from "@tslib/ftl";
+import { localizedNumber } from "@tslib/i18n";
+import { timeSpan } from "@tslib/time";
 import type { Bin } from "d3";
-import * as tr from "../lib/ftl";
-import { timeSpan } from "../lib/time";
-import { CardType } from "../lib/cards";
-import type { HistogramData } from "./histogram-graph";
+import { bin, extent, interpolateBlues, mean, quantile, scaleLinear, scaleSequential, sum } from "d3";
 
-import type { TableDatum, SearchDispatch } from "./graph-helpers";
+import type { SearchDispatch, TableDatum } from "./graph-helpers";
+import { numericMap } from "./graph-helpers";
+import type { HistogramData } from "./histogram-graph";
 
 export interface IntervalGraphData {
     intervals: number[];
@@ -36,27 +27,39 @@ export enum IntervalRange {
     All = 3,
 }
 
-export function gatherIntervalData(data: Stats.GraphsResponse): IntervalGraphData {
-    const intervals = (data.cards as Cards.Card[])
-        .filter((c) => [CardType.Review, CardType.Relearn].includes(c.ctype))
-        .map((c) => c.interval);
-    return { intervals };
+export function gatherIntervalData(data: GraphsResponse_Intervals): IntervalGraphData {
+    // This could be made more efficient - this graph currently expects a flat list of individual intervals which it
+    // uses to calculate a percentile and then converts into a histogram, and the percentile/histogram calculations
+    // in JS are relatively slow.
+    const map = numericMap(data.intervals);
+    const totalCards = sum(map, ([_k, v]) => v);
+    const allIntervals: number[] = Array(totalCards);
+    let position = 0;
+    for (const entry of map.entries()) {
+        allIntervals.fill(entry[0], position, position + entry[1]);
+        position += entry[1];
+    }
+    allIntervals.sort((a, b) => a - b);
+    return { intervals: allIntervals };
 }
 
 export function intervalLabel(
     daysStart: number,
     daysEnd: number,
     cards: number,
+    fsrs: boolean,
 ): string {
     if (daysEnd - daysStart <= 1) {
         // singular
-        return tr.statisticsIntervalsDaySingle({
+        const fn = fsrs ? tr.statisticsStabilityDaySingle : tr.statisticsIntervalsDaySingle;
+        return fn({
             day: daysStart,
             cards,
         });
     } else {
         // range
-        return tr.statisticsIntervalsDayRange({
+        const fn = fsrs ? tr.statisticsStabilityDayRange : tr.statisticsIntervalsDayRange;
+        return fn({
             daysStart,
             daysEnd: daysEnd - 1,
             cards,
@@ -64,15 +67,23 @@ export function intervalLabel(
     }
 }
 
-function makeQuery(start: number, end: number): string {
+function makeSm2Query(start: number, end: number): string {
     if (start === end) {
         return `"prop:ivl=${start}"`;
     }
 
     const fromQuery = `"prop:ivl>=${start}"`;
     const tillQuery = `"prop:ivl<=${end}"`;
+    return `${fromQuery} ${tillQuery}`;
+}
 
-    return `${fromQuery} AND ${tillQuery}`;
+function makeFsrsQuery(start: number, end: number): string {
+    if (start === 0) {
+        start = 0.5;
+    }
+    const fromQuery = `"prop:s>=${start - 0.5}"`;
+    const tillQuery = `"prop:s<${end + 0.5}"`;
+    return `${fromQuery} ${tillQuery}`;
 }
 
 export function prepareIntervalData(
@@ -80,6 +91,7 @@ export function prepareIntervalData(
     range: IntervalRange,
     dispatch: SearchDispatch,
     browserLinksSupported: boolean,
+    fsrs: boolean,
 ): [HistogramData | null, TableDatum[]] {
     // get min/max
     const allIntervals = data.intervals;
@@ -111,8 +123,8 @@ export function prepareIntervalData(
 
     xMax = xMax! + 1;
 
-    // do not show the zero interval
-    const increment = (x: number): number => x + 1;
+    // do not show the zero interval for intervals
+    const increment = fsrs ? x => x : (x: number): number => x + 1;
 
     const adjustTicks = (x: number, idx: number, ticks: number[]): number[] =>
         idx === ticks.length - 1 ? [x - (ticks[0] - 1), x + 1] : [x - (ticks[0] - 1)];
@@ -125,7 +137,7 @@ export function prepareIntervalData(
         (niceNecessary ? prescale.nice() : prescale).domain().map(increment),
     );
 
-    const bins = histogram()
+    const bins = bin()
         .domain(scale.domain() as [number, number])
         .thresholds(scale.ticks(desiredBars).flatMap(adjustTicks))(allIntervals);
 
@@ -136,9 +148,7 @@ export function prepareIntervalData(
     }
 
     const adjustedRange = scaleLinear().range([0.7, 0.3]);
-    const colourScale = scaleSequential((n) =>
-        interpolateBlues(adjustedRange(n)!),
-    ).domain([xMax!, xMin!]);
+    const colourScale = scaleSequential((n) => interpolateBlues(adjustedRange(n)!)).domain([xMax!, xMin!]);
 
     function hoverText(
         bin: Bin<number, number>,
@@ -146,7 +156,7 @@ export function prepareIntervalData(
         percent: number,
     ): string {
         // const day = dayLabel(bin.x0!, bin.x1!);
-        const interval = intervalLabel(bin.x0!, bin.x1!, bin.length);
+        const interval = intervalLabel(bin.x0!, bin.x1!, bin.length, fsrs);
         const total = tr.statisticsRunningTotal();
         return `${interval}<br>${total}: \u200e${localizedNumber(percent, 1)}%`;
     }
@@ -154,7 +164,7 @@ export function prepareIntervalData(
     function onClick(bin: Bin<number, number>): void {
         const start = bin.x0!;
         const end = bin.x1! - 1;
-        const query = makeQuery(start, end);
+        const query = (fsrs ? makeFsrsQuery : makeSm2Query)(start, end);
         dispatch("search", { query });
     }
 
@@ -162,7 +172,7 @@ export function prepareIntervalData(
     const meanIntervalString = timeSpan(meanInterval * 86400, false);
     const tableData = [
         {
-            label: tr.statisticsAverageInterval(),
+            label: fsrs ? tr.statisticsAverageStability() : tr.statisticsAverageInterval(),
             value: meanIntervalString,
         },
     ];

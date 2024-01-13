@@ -3,18 +3,19 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import type { Readable } from "svelte/store";
-    import { getContext } from "svelte";
-    import { directionKey } from "../lib/context-keys";
+    import * as tr from "@tslib/ftl";
 
-    const direction = getContext<Readable<"ltr" | "rtl">>(directionKey);
+    import CollapseLabel from "./CollapseLabel.svelte";
+
+    export let collapsed: boolean;
+
+    $: tooltip = collapsed ? tr.editingExpandField() : tr.editingCollapseField();
 </script>
 
-<div
-    class="label-container"
-    class:rtl={$direction === "rtl"}
-    on:mousedown|preventDefault
->
+<div class="label-container">
+    <CollapseLabel {collapsed} {tooltip} on:toggle>
+        <slot name="field-name" />
+    </CollapseLabel>
     <slot />
 </div>
 
@@ -22,18 +23,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     .label-container {
         display: flex;
         justify-content: space-between;
+        background: var(--canvas);
+        border-top-right-radius: var(--border-radius);
+        border-top-left-radius: var(--border-radius);
+        padding: 0 3px 1px;
 
-        background-color: var(--label-color, transparent);
-
-        border-width: 0 0 1px;
-        border-style: dashed;
-        border-color: var(--border-color);
-        border-radius: 5px 5px 0 0;
-
-        padding: 0px 6px;
-    }
-
-    .rtl {
-        direction: rtl;
+        position: sticky;
+        top: 0;
+        z-index: 50;
     }
 </style>

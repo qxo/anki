@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import { registerPackage } from "./register-package";
+import { registerPackage } from "./runtime-require";
 
 declare global {
     interface Window {
@@ -9,7 +9,7 @@ declare global {
     }
 }
 
-/// HTML <a> tag pointing to a bridge command.
+/** HTML <a> tag pointing to a bridge command. */
 export function bridgeLink(command: string, label: string): string {
     return `<a href="javascript:bridgeCommand('${command}')">${label}</a>`;
 }

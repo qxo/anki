@@ -3,20 +3,10 @@
 
 from __future__ import annotations
 
-import sys
-
 import anki.scheduler.base as _base
 
 UnburyDeck = _base.UnburyDeck
 CongratsInfo = _base.CongratsInfo
 BuryOrSuspend = _base.BuryOrSuspend
 FilteredDeckForUpdate = _base.FilteredDeckForUpdate
-
-# add aliases to the legacy pathnames
-import anki.scheduler.v1
-import anki.scheduler.v2
-
-sys.modules["anki.sched"] = sys.modules["anki.scheduler.v1"]
-sys.modules["anki.schedv2"] = sys.modules["anki.scheduler.v2"]
-anki.sched = sys.modules["anki.scheduler.v1"]  # type: ignore
-anki.schedv2 = sys.modules["anki.scheduler.v2"]  # type: ignore
+CustomStudyRequest = _base.CustomStudyRequest

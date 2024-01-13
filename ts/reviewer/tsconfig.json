@@ -1,5 +1,10 @@
 {
     "extends": "../tsconfig.json",
     "include": ["*"],
-    "references": [{ "path": "../lib" }]
+    // "references": [{ "path": "../lib" }],
+    "compilerOptions": {
+        "alwaysStrict": true,
+        "composite": false,
+        "types": ["jest"]
+    }
 }

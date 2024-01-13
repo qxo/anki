@@ -5,8 +5,9 @@
 See pylib/tools/genhooks.py for more info.
 """
 
-import os
 import sys
+
+sys.path.append("pylib/tools")
 
 from hookslib import Hook, write_file
 
@@ -19,7 +20,7 @@ prefix = """\
 
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence, Literal
+from typing import Any, Callable, Sequence, Literal, Type
 
 import anki
 import aqt
@@ -66,6 +67,34 @@ hooks = [
         """,
     ),
     Hook(
+        name="overview_will_render_bottom",
+        args=[
+            "link_handler: Callable[[str], bool]",
+            "links: list[list[str]]",
+        ],
+        return_type="Callable[[str], bool]",
+        doc="""Allows adding buttons to the Overview bottom bar.
+
+        Append a list of strings to 'links' argument to add new buttons.
+        - The first value is the shortcut to appear in the tooltip.
+        - The second value is the url to be triggered.
+        - The third value is the text of the new button.
+
+        Extend the callable 'link_handler' to handle new urls. This callable
+        accepts one argument: the triggered url.
+        Make a check of the triggered url, call any functions related to
+        that trigger, and return the new link_handler.
+
+        Example:
+        links.append(['H', 'hello', 'Click me!'])
+        def custom_link_handler(url):
+            if url == 'hello':
+                print('Hello World!')
+            return link_handler(url=url)
+        return custom_link_handler
+        """,
+    ),
+    Hook(
         name="reviewer_did_show_question",
         args=["card: Card"],
         legacy_hook="showQuestion",
@@ -87,8 +116,8 @@ hooks = [
         return_type="tuple[tuple[int, str], ...]",
         doc="""Used to modify list of answer buttons
 
-        buttons_tuple is a tuple of buttons, with each button represented by a 
-        tuple containing an int for the button's ease and a string for the 
+        buttons_tuple is a tuple of buttons, with each button represented by a
+        tuple containing an int for the button's ease and a string for the
         button's label.
 
         Return a tuple of the form ((int, str), ...), e.g.:
@@ -108,11 +137,11 @@ hooks = [
         return_type="tuple[bool, Literal[1, 2, 3, 4]]",
         doc="""Used to modify the ease at which a card is rated or to bypass
         rating the card completely.
-        
+
         ease_tuple is a tuple consisting of a boolean expressing whether the reviewer
         should continue with rating the card, and an integer expressing the ease at
         which the card should be rated.
-        
+
         If your code just needs to be notified of the card rating event, you should use
         the reviewer_did_answer_card hook instead.""",
     ),
@@ -164,6 +193,42 @@ hooks = [
         option is unchecked; This is so as to allow playing custom
         sounds regardless of that option.""",
     ),
+    Hook(
+        name="reviewer_will_replay_recording",
+        args=["path: str"],
+        return_type="str",
+        doc="""Used to inspect and modify a recording recorded by "Record Own Voice" before replaying.""",
+    ),
+    Hook(
+        name="reviewer_will_suspend_note",
+        args=["nid: int"],
+    ),
+    Hook(
+        name="reviewer_will_suspend_card",
+        args=["id: int"],
+    ),
+    Hook(
+        name="reviewer_will_bury_note",
+        args=["nid: int"],
+    ),
+    Hook(
+        name="reviewer_will_bury_card",
+        args=["id: int"],
+    ),
+    Hook(
+        name="audio_did_pause_or_unpause",
+        args=["webview: aqt.webview.AnkiWebView"],
+        doc="""Called when the audio is paused or unpaused.
+        This hook is triggered by the action in Anki's More menu or the related key binding.
+        The webview is provided in case you wish to use this hook with web-based audio.""",
+    ),
+    Hook(
+        name="audio_did_seek_relative",
+        args=["webview: aqt.webview.AnkiWebView", "seek_seconds: int"],
+        doc="""Called when the audio is sought forward (positive seek) or backwards (negative seek).
+        This hook is triggered by the action in Anki's More menu or the related key binding.
+        The webview is provided in case you wish to use this hook with web-based audio.""",
+    ),
     # Debug
     ###################
     Hook(
@@ -187,8 +252,21 @@ hooks = [
         doc="""Allow to change the display of the card layout. After most values are
          set and before the window is actually shown.""",
     ),
+    # Reviewer
+    ###################
+    Hook(
+        name="reviewer_did_init",
+        args=["reviewer: aqt.reviewer.Reviewer"],
+        doc="""Called after the reviewer is initialized.""",
+    ),
     # Multiple windows
     ###################
+    # reviewer and previewer
+    Hook(
+        name="audio_will_replay",
+        args=["webview: aqt.webview.AnkiWebView", "card: Card", "is_front_side: bool"],
+        doc="""Called when the user uses the 'replay audio' action, but not when they click on a play button.""",
+    ),
     # reviewer, clayout and browser
     Hook(
         name="card_will_show",
@@ -196,6 +274,15 @@ hooks = [
         return_type="str",
         legacy_hook="prepareQA",
         doc="Can modify card text before review/preview.",
+    ),
+    # reviewer, main and clayout
+    Hook(
+        name="card_review_webview_did_init",
+        args=[
+            "webview: aqt.webview.AnkiWebView",
+            "kind: aqt.webview.AnkiWebViewKind",
+        ],
+        doc="Called when initializing the webview for the review screen, the card layout screen, and the preview screen.",
     ),
     # Deck browser
     ###################
@@ -211,17 +298,17 @@ hooks = [
             "content: aqt.deckbrowser.DeckBrowserContent",
         ],
         doc="""Used to modify HTML content sections in the deck browser body
-        
+
         'content' contains the sections of HTML content the deck browser body
         will be updated with.
-        
+
         When modifying the content of a particular section, please make sure your
         changes only perform the minimum required edits to make your add-on work.
         You should avoid overwriting or interfering with existing data as much
         as possible, instead opting to append your own changes, e.g.:
-        
+
             def on_deck_browser_will_render_content(deck_browser, content):
-                content.stats += "\n<div>my html</div>"
+                content.stats += "\\n<div>my html</div>"
         """,
     ),
     # Deck options (legacy screen)
@@ -301,7 +388,7 @@ hooks = [
             "deck_options: aqt.deckoptions.DeckOptionsDialog",
         ],
         doc="""Can be used to inject extra options into the config screen.
-        
+
         See the example add-ons at:
         https://github.com/ankitects/anki-addons/tree/main/demos/deckoptions_svelte
         https://github.com/ankitects/anki-addons/tree/main/demos/deckoptions_raw_html
@@ -381,36 +468,36 @@ hooks = [
         ],
         return_type="bool",
         doc="""Used to add or replace items in the browser sidebar tree
-        
+
         'tree' is the root SidebarItem that all other items are added to.
-        
+
         'stage' is an enum describing the different construction stages of
         the sidebar tree at which you can interject your changes.
         The different values can be inspected by looking at
         aqt.browser.SidebarStage.
-        
+
         If you want Anki to proceed with the construction of the tree stage
         in question after your have performed your changes or additions,
         return the 'handled' boolean unchanged.
-        
+
         On the other hand, if you want to prevent Anki from adding its own
         items at a particular construction stage (e.g. in case your add-on
         implements its own version of that particular stage), return 'True'.
-        
+
         If you return 'True' at SidebarStage.ROOT, the sidebar will not be
         populated by any of the other construction stages. For any other stage
         the tree construction will just continue as usual.
-        
+
         For example, if your code wishes to replace the tag tree, you could do:
-        
+
             def on_browser_will_build_tree(handled, root, stage, browser):
                 if stage != SidebarStage.TAGS:
                     # not at tag tree building stage, pass on
                     return handled
-                
+
                 # your tag tree construction code
                 # root.addChild(...)
-                
+
                 # your code handled tag tree construction, no need for Anki
                 # or other add-ons to build the tag tree
                 return True
@@ -420,15 +507,18 @@ hooks = [
         name="browser_will_search",
         args=["context: aqt.browser.SearchContext"],
         doc="""Allows you to modify the search text, or perform your own search.
-         
+
          You can modify context.search to change the text that is sent to the
          searching backend.
-         
-         If you set context.card_ids to a list of ids, the regular search will
+
+         If you set context.ids to a list of ids, the regular search will
          not be performed, and the provided ids will be used instead.
-         
-         Your add-on should check if context.card_ids is not None, and return
+
+         Your add-on should check if context.ids is not None, and return
          without making changes if it has been set.
+
+         In versions of Anki lower than 2.1.45 the field to check is
+         context.card_ids rather than context.ids
          """,
     ),
     Hook(
@@ -445,11 +535,11 @@ hooks = [
             "columns: Sequence[str]",
         ],
         doc="""Allows you to add or modify content to a row in the browser.
-        
+
         You can mutate the row object to change what is displayed. Any columns the
         backend did not recognize will be returned as an empty string, and can be
         replaced with custom content.
-        
+
         Columns is a list of string values identifying what each column in the row
         represents.
         """,
@@ -458,40 +548,60 @@ hooks = [
         name="browser_did_fetch_columns",
         args=["columns: dict[str, aqt.browser.Column]"],
         doc="""Allows you to add custom columns to the browser.
-        
-        columns is a dictionary of data obejcts. You can add an entry with a custom
+
+        columns is a dictionary of data objects. You can add an entry with a custom
         column to describe how it should be displayed in the browser or modify
         existing entries.
 
         Every column in the dictionary will be toggleable by the user.
         """,
     ),
+    # Previewer
+    ###################
+    Hook(
+        name="previewer_did_init",
+        args=["previewer: aqt.browser.previewer.Previewer"],
+        doc="""Called after the previewer is initialized.""",
+    ),
+    Hook(
+        name="previewer_will_redraw_after_show_both_sides_toggled",
+        args=[
+            "webview: aqt.webview.AnkiWebView",
+            "card: Card",
+            "is_front_side: bool",
+            "show_both_sides: bool",
+        ],
+        doc="""Called when the checkbox <show both sides> is toggled by the user.""",
+    ),
     # Main window states
     ###################
     # these refer to things like deckbrowser, overview and reviewer state,
     Hook(
         name="state_will_change",
-        args=["new_state: str", "old_state: str"],
+        args=[
+            "new_state: aqt.main.MainWindowState",
+            "old_state: aqt.main.MainWindowState",
+        ],
         legacy_hook="beforeStateChange",
     ),
     Hook(
         name="state_did_change",
-        args=["new_state: str", "old_state: str"],
+        args=[
+            "new_state: aqt.main.MainWindowState",
+            "old_state: aqt.main.MainWindowState",
+        ],
         legacy_hook="afterStateChange",
     ),
     # different sig to original
     Hook(
         name="state_shortcuts_will_change",
-        args=["state: str", "shortcuts: list[tuple[str, Callable]]"],
+        args=[
+            "state: aqt.main.MainWindowState",
+            "shortcuts: list[tuple[str, Callable]]",
+        ],
     ),
     # UI state/refreshing
     ###################
-    Hook(
-        name="state_did_revert",
-        args=["action: str"],
-        legacy_hook="revertedState",
-        doc="Legacy hook, called after undoing.",
-    ),
     Hook(
         name="state_did_undo",
         args=["changes: OpChangesAfterUndo"],
@@ -501,7 +611,7 @@ hooks = [
         name="state_did_reset",
         legacy_hook="reset",
         doc="""Legacy 'reset' hook. Called by mw.reset() and CollectionOp() to redraw the UI.
-        
+
         New code should use `operation_did_execute` instead.
         """,
     ),
@@ -510,7 +620,7 @@ hooks = [
         args=["changes: anki.collection.OpChanges", "handler: object | None"],
         doc="""Called after an operation completes.
         Changes can be inspected to determine whether the UI needs updating.
-        
+
         This will also be called when the legacy mw.reset() is used.
         """,
     ),
@@ -526,7 +636,7 @@ hooks = [
     Hook(
         name="backend_will_block",
         doc="""Called before one or more DB tasks are run in the background.
-        
+
         Subscribers can use this to set a flag to avoid DB queries until the operation
         completes, as doing so will freeze the UI until the long-running operation
         completes.
@@ -543,6 +653,10 @@ hooks = [
         name="theme_did_change",
         doc="Called after night mode is toggled.",
     ),
+    Hook(
+        name="body_classes_need_update",
+        doc="Called when a setting involving a webview body class is toggled.",
+    ),
     # Webview
     ###################
     Hook(
@@ -550,17 +664,17 @@ hooks = [
         args=["handled: tuple[bool, Any]", "message: str", "context: Any"],
         return_type="tuple[bool, Any]",
         doc="""Used to handle pycmd() messages sent from Javascript.
-        
+
         Message is the string passed to pycmd().
 
         For messages you don't want to handle, return 'handled' unchanged.
-        
+
         If you handle a message and don't want it passed to the original
         bridge command handler, return (True, None).
-        
+
         If you want to pass a value to pycmd's result callback, you can
         return it with (True, some_value).
-                
+
         Context is the instance that was passed to set_bridge_command().
         It can be inspected to check which screen this hook is firing
         in, and to get a reference to the screen. For example, if your
@@ -569,7 +683,7 @@ hooks = [
             if not isinstance(context, aqt.reviewer.Reviewer):
                 # not reviewer, pass on message
                 return handled
-    
+
             if message == "my-mark-action":
                 # our message, call onMark() on the reviewer instance
                 context.onMark()
@@ -597,17 +711,17 @@ hooks = [
         code wishes to function only in the review screen, you could do:
 
             def on_webview_will_set_content(web_content: WebContent, context):
-                
+
                 if not isinstance(context, aqt.reviewer.Reviewer):
                     # not reviewer, do not modify content
                     return
-                
+
                 # reviewer, perform changes to content
-                
+
                 context: aqt.reviewer.Reviewer
-                
+
                 addon_package = mw.addonManager.addonFromModule(__name__)
-                
+
                 web_content.css.append(
                     f"/_addons/{addon_package}/web/my-addon.css")
                 web_content.js.append(
@@ -631,10 +745,9 @@ mutate the DOM before the page is revealed.
 
 For example:
 
-def mytest(web: AnkiWebView):
-    page = os.path.basename(web.page().url().path())
-    if page != "graphs.html":
-    	return
+def mytest(webview: AnkiWebView):
+    if webview.kind != AnkiWebViewKind.DECK_STATS:
+        return
     web.eval(
         """
     div = document.createElement("div");
@@ -651,7 +764,7 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
     Hook(
         name="main_window_did_init",
         doc="""Executed after the main window is fully initialized
-        
+
         A sample use case for this hook would be to delay actions until Anki objects
         like the profile or collection are fully initialized. In contrast to
         `profile_did_open`, this hook will only fire once per Anki session and
@@ -681,7 +794,7 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         name="profile_did_open",
         legacy_hook="profileLoaded",
         doc="""Executed whenever a user profile has been opened
-        
+
         Please note that this hook will also be called on profile switches, so if you
         are looking to simply delay an add-on action in a single-shot manner,
         `main_window_did_init` is likely the more suitable choice.
@@ -689,12 +802,21 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
     ),
     Hook(name="profile_will_close", legacy_hook="unloadProfile"),
     Hook(
+        name="collection_will_temporarily_close",
+        args=["col: anki.collection.Collection"],
+        doc="""Called before one-way syncs and colpkg imports/exports.""",
+    ),
+    Hook(
+        name="collection_did_temporarily_close",
+        args=["col: anki.collection.Collection"],
+        doc="""Called after one-way syncs and colpkg imports/exports.""",
+    ),
+    Hook(
         name="collection_did_load",
         args=["col: anki.collection.Collection"],
         legacy_hook="colLoading",
     ),
     Hook(name="undo_state_did_change", args=["info: UndoActionsInfo"]),
-    Hook(name="review_did_undo", args=["card_id: int"], legacy_hook="revertedCard"),
     Hook(
         name="style_did_init",
         args=["style: str"],
@@ -705,7 +827,7 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         name="top_toolbar_did_init_links",
         args=["links: list[str]", "top_toolbar: aqt.toolbar.Toolbar"],
         doc="""Used to modify or add links in the top toolbar of Anki's main window
-        
+
         'links' is a list of HTML link elements. Add-ons can generate their own links
         by using aqt.toolbar.Toolbar.create_link. Links created in that way can then be
         appended to the link list, e.g.:
@@ -716,13 +838,43 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         """,
     ),
     Hook(
+        name="top_toolbar_will_set_left_tray_content",
+        args=["content: list[str]", "top_toolbar: aqt.toolbar.Toolbar"],
+        doc="""Used to add custom add-on components to the *left* area of Anki's main
+        window toolbar
+
+        'content' is a list of HTML strings added by add-ons which you can append your
+        own components or elements to. To equip your components with logic and styling
+        please see `webview_will_set_content` and `webview_did_receive_js_message`.
+        
+        Please note that Anki's main screen is due to undergo a significant refactor
+        in the future and, as a result, add-ons subscribing to this hook will likely
+        require changes to continue working.
+        """,
+    ),
+    Hook(
+        name="top_toolbar_will_set_right_tray_content",
+        args=["content: list[str]", "top_toolbar: aqt.toolbar.Toolbar"],
+        doc="""Used to add custom add-on components to the *right* area of Anki's main
+        window toolbar
+
+        'content' is a list of HTML strings added by add-ons which you can append your
+        own components or elements to. To equip your components with logic and styling
+        please see `webview_will_set_content` and `webview_did_receive_js_message`.
+        
+        Please note that Anki's main screen is due to undergo a significant refactor
+        in the future and, as a result, add-ons subscribing to this hook will likely
+        require changes to continue working.
+        """,
+    ),
+    Hook(
         name="top_toolbar_did_redraw",
         args=["top_toolbar: aqt.toolbar.Toolbar"],
         doc="""Executed when the top toolbar is redrawn""",
     ),
     Hook(
         name="media_sync_did_progress",
-        args=["entry: aqt.mediasync.LogEntryWithTime"],
+        args=["entry: str"],
     ),
     Hook(name="media_sync_did_start_or_stop", args=["running: bool"]),
     Hook(
@@ -739,6 +891,62 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         Note that the media sync did not necessarily finish at this point.""",
     ),
     Hook(name="media_check_will_start", args=[]),
+    Hook(
+        name="media_check_did_finish",
+        args=["output: anki.media.CheckMediaResponse"],
+        doc="""Called after Media Check finishes.
+
+        `output` provides access to the unused/missing file lists and the text output that will be shown in the Check Media screen.""",
+    ),
+    # Importing/exporting data
+    ###################
+    Hook(
+        name="exporter_will_export",
+        args=[
+            "export_options: aqt.import_export.exporting.ExportOptions",
+            "exporter: aqt.import_export.exporting.Exporter",
+        ],
+        return_type="aqt.import_export.exporting.ExportOptions",
+        doc="""Called before collection and deck exports.
+
+        Allows add-ons to be notified of impending deck exports and potentially
+        modify the export options. To perform the export unaltered, please return
+        `export_options` as is, e.g.:
+
+            def on_exporter_will_export(export_options: ExportOptions, exporter: Exporter):
+                if not isinstance(exporter, ApkgExporter):
+                    return export_options
+                export_options.limit = ...
+                return export_options
+        """,
+    ),
+    Hook(
+        name="exporter_did_export",
+        args=[
+            "export_options: aqt.import_export.exporting.ExportOptions",
+            "exporter: aqt.import_export.exporting.Exporter",
+        ],
+        doc="""Called after collection and deck exports.""",
+    ),
+    Hook(
+        name="legacy_exporter_will_export",
+        args=["legacy_exporter: anki.exporting.Exporter"],
+        doc="""Called before collection and deck exports performed by legacy exporters.""",
+    ),
+    Hook(
+        name="legacy_exporter_did_export",
+        args=["legacy_exporter: anki.exporting.Exporter"],
+        doc="""Called after collection and deck exports performed by legacy exporters.""",
+    ),
+    Hook(
+        name="exporters_list_did_initialize",
+        args=["exporters: list[Type[aqt.import_export.exporting.Exporter]]"],
+        doc="""Called after the list of exporter classes is created.
+
+        Allows you to register custom exporters and/or replace existing ones by
+        modifying the exporter list.
+        """,
+    ),
     # Dialog Manager
     ###################
     Hook(
@@ -779,6 +987,26 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         input.""",
     ),
     Hook(
+        name="add_cards_might_add_note",
+        args=["optional_problems: list[str]", "note: anki.notes.Note"],
+        doc="""
+            Allows you to provide an optional reason to reject a note. A
+            yes / no dialog will open displaying the problem, to which the
+            user can decide if they would like to add the note anyway.
+
+            optional_problems is a list containing the optional reasons for which
+            you might reject a note. If your add-on wants to add a reason,
+            it should append the reason to the list.
+
+            An example add-on that asks the user for confirmation before adding a
+            card without tags:
+
+            def might_reject_empty_tag(optional_problems, note):
+                if not any(note.tags):
+                    optional_problems.append("Add cards without tags?")
+        """,
+    ),
+    Hook(
         name="addcards_will_add_history_entry",
         args=["line: str", "note: anki.notes.Note"],
         return_type="str",
@@ -787,13 +1015,26 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
     Hook(
         name="add_cards_did_change_note_type",
         args=["old: anki.models.NoteType", "new: anki.models.NoteType"],
+        doc="""Deprecated. Use addcards_did_change_note_type instead.
+        Executed after the user selects a new note type when adding
+        cards.""",
+    ),
+    Hook(
+        name="addcards_did_change_note_type",
+        args=[
+            "addcards: aqt.addcards.AddCards",
+            "old: anki.models.NoteType",
+            "new: anki.models.NoteType",
+        ],
+        replaces="add_cards_did_change_note_type",
+        replaced_hook_args=["old: anki.models.NoteType", "new: anki.models.NoteType"],
         doc="""Executed after the user selects a new note type when adding
         cards.""",
     ),
     Hook(
         name="add_cards_did_change_deck",
         args=["new_deck_id: int"],
-        doc="""Executed after the user selects a new different deck when 
+        doc="""Executed after the user selects a new different deck when
         adding cards.""",
     ),
     # Editing
@@ -904,6 +1145,25 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         or by a right-click paste.
         """,
     ),
+    Hook(
+        name="editor_state_did_change",
+        args=[
+            "editor: aqt.editor.Editor",
+            "new_state: aqt.editor.EditorState",
+            "old_state: aqt.editor.EditorState",
+        ],
+        doc="""Called when the input state of the editor changes, e.g. when
+        switching to an image occlusion note type.""",
+    ),
+    Hook(
+        name="editor_mask_editor_did_load_image",
+        args=["editor: aqt.editor.Editor", "path_or_nid: str | anki.notes.NoteId"],
+        doc="""Called when the image occlusion mask editor has completed
+        loading an image.
+        
+        When adding new notes `path_or_nid` will be the path to the image file.
+        When editing existing notes `path_or_nid` will be the note id.""",
+    ),
     # Tag
     ###################
     Hook(name="tag_editor_did_process_key", args=["tag_edit: TagEdit", "evt: QEvent"]),
@@ -915,6 +1175,29 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         args=["player: aqt.sound.Player", "tag: anki.sound.AVTag"],
     ),
     Hook(name="av_player_did_end_playing", args=["player: aqt.sound.Player"]),
+    Hook(
+        name="av_player_will_play_tags",
+        args=[
+            "tags: list[anki.sound.AVTag]",
+            "side: str",
+            "context: Any",
+        ],
+        doc="""Called before playing a card side's sounds.
+
+        `tags` can be used to inspect and manipulate the sounds
+        that will be played (if any).
+
+        `side` can either be "question" or "answer".
+
+        `context` is the screen where the sounds will be played (e.g., Reviewer, Previewer, and CardLayout).
+
+        This won't be called when the user manually plays sounds
+        using `Replay Audio`.
+
+        Note that this hook is called even when the `Automatically play audio`
+        option is unchecked; This is so as to allow playing custom
+        sounds regardless of that option.""",
+    ),
     # Addon
     ###################
     Hook(
@@ -931,6 +1214,17 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         name="addon_config_editor_will_save_json",
         args=["text: str"],
         return_type="str",
+        doc="""Deprecated. Use addon_config_editor_will_update_json instead.
+        Allows changing the text of the json configuration that was
+        received from the user before actually reading it. For
+        example, you can replace new line in strings by some "\\\\n".""",
+    ),
+    Hook(
+        name="addon_config_editor_will_update_json",
+        args=["text: str", "addon: str"],
+        return_type="str",
+        replaces="addon_config_editor_will_save_json",
+        replaced_hook_args=["text: str"],
         doc="""Allows changing the text of the json configuration that was
         received from the user before actually reading it. For
         example, you can replace new line in strings by some "\\\\n".""",
@@ -951,6 +1245,22 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
         args=["dialog: aqt.addons.AddonsDialog", "ids: list[str]"],
         doc="""Allows doing an action before an add-on is deleted.""",
     ),
+    Hook(
+        name="addon_manager_will_install_addon",
+        args=["manager: aqt.addons.AddonManager", "module: str"],
+        doc="""Called before installing or updating an addon.
+        
+        Can be used to release DB connections or open files that
+        would prevent an update from succeeding.""",
+    ),
+    Hook(
+        name="addon_manager_did_install_addon",
+        args=["manager: aqt.addons.AddonManager", "module: str"],
+        doc="""Called after installing or updating an addon.
+        
+        Can be used to restore DB connections or open files after
+        an add-on has been updated.""",
+    ),
     # Model
     ###################
     Hook(
@@ -968,6 +1278,10 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
     ),
     # Fields
     ###################
+    Hook(
+        name="fields_did_add_field",
+        args=["dialog: aqt.fields.FieldDialog", "field: anki.models.FieldDict"],
+    ),
     Hook(
         name="fields_did_rename_field",
         args=[

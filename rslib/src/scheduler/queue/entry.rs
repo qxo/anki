@@ -1,10 +1,13 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{LearningQueueEntry, MainQueueEntry, MainQueueEntryKind};
-use crate::{card::CardQueue, prelude::*};
+use super::LearningQueueEntry;
+use super::MainQueueEntry;
+use super::MainQueueEntryKind;
+use crate::card::CardQueue;
+use crate::prelude::*;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueEntry {
     IntradayLearning(LearningQueueEntry),
     Main(MainQueueEntry),
@@ -37,7 +40,7 @@ impl QueueEntry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueEntryKind {
     New,
     Learning,

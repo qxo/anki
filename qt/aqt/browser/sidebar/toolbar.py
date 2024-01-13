@@ -6,6 +6,8 @@ from __future__ import annotations
 from enum import Enum, auto
 
 import aqt
+import aqt.browser
+import aqt.gui_hooks
 from aqt.qt import *
 from aqt.theme import theme_manager
 from aqt.utils import tr
@@ -18,8 +20,16 @@ class SidebarTool(Enum):
 
 class SidebarToolbar(QToolBar):
     _tools: tuple[tuple[SidebarTool, str, Callable[[], str]], ...] = (
-        (SidebarTool.SEARCH, "icons:magnifying_glass.svg", tr.actions_search),
-        (SidebarTool.SELECT, "icons:select.svg", tr.actions_select),
+        (
+            SidebarTool.SEARCH,
+            "mdi:magnify",
+            tr.actions_search,
+        ),
+        (
+            SidebarTool.SELECT,
+            "mdi:selection-drag",
+            tr.actions_select,
+        ),
     )
 
     def __init__(self, sidebar: aqt.browser.sidebar.SidebarTreeView) -> None:
@@ -28,7 +38,7 @@ class SidebarToolbar(QToolBar):
         self._action_group = QActionGroup(self)
         qconnect(self._action_group.triggered, self._on_action_group_triggered)
         self._setup_tools()
-        self.setIconSize(QSize(16, 16))
+        self.setIconSize(QSize(18, 18))
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setStyle(QStyleFactory.create("fusion"))
         aqt.gui_hooks.theme_did_change.append(self._update_icons)

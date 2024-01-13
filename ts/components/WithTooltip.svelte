@@ -3,8 +3,8 @@
     License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { onDestroy } from "svelte";
     import Tooltip from "bootstrap/js/dist/tooltip";
+    import { onDestroy } from "svelte";
 
     type TriggerType =
         | "hover focus"
@@ -25,8 +25,11 @@
     export let showDelay = 0;
     export let hideDelay = 0;
 
+    let tooltipElement: HTMLElement;
+
     let tooltipObject: Tooltip;
     function createTooltip(element: HTMLElement): void {
+        tooltipElement = element;
         element.title = tooltip;
         tooltipObject = new Tooltip(element, {
             placement,
@@ -37,16 +40,12 @@
         });
     }
 
-    onDestroy(() => tooltipObject?.dispose());
-
-    // hack to update field description tooltips
-    let previousTooltip: string = tooltip;
-    $: if (tooltip !== previousTooltip) {
-        previousTooltip = tooltip;
-        let element: HTMLElement = tooltipObject["_element"];
-        tooltipObject.dispose();
-        createTooltip(element);
-    }
+    onDestroy(() => {
+        tooltipElement?.addEventListener("hidden.bs.tooltip", () => {
+            tooltipObject?.dispose();
+        });
+        tooltipObject?.hide();
+    });
 </script>
 
 <slot {createTooltip} {tooltipObject} />

@@ -1,8 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_bool_from_anything;
-use serde_derive::Deserialize;
 use strum::IntoStaticStr;
 
 use crate::prelude::*;
@@ -10,6 +10,7 @@ use crate::prelude::*;
 #[derive(Debug, Clone, Copy, IntoStaticStr)]
 #[strum(serialize_all = "camelCase")]
 pub enum BoolKey {
+    ApplyAllParentLimits,
     BrowserTableShowNotesMode,
     CardCountsSeparateInactive,
     CollapseCardState,
@@ -21,12 +22,23 @@ pub enum BoolKey {
     CollapseToday,
     FutureDueShowBacklog,
     HideAudioPlayButtons,
+    IgnoreAccentsInSearch,
     InterruptAudioWhenAnswering,
+    NewCardsIgnoreReviewLimit,
     PasteImagesAsPng,
     PasteStripsFormatting,
     PreviewBothSides,
+    RestorePositionBrowser,
+    RestorePositionReviewer,
+    ResetCountsBrowser,
+    ResetCountsReviewer,
+    RandomOrderReposition,
     Sched2021,
-
+    ShiftPositionOfExistingCards,
+    MergeNotetypes,
+    WithScheduling,
+    WithDeckConfigs,
+    Fsrs,
     #[strum(to_string = "normalize_note_text")]
     NormalizeNoteText,
     #[strum(to_string = "dayLearnFirst")]
@@ -54,6 +66,8 @@ impl Collection {
             | BoolKey::FutureDueShowBacklog
             | BoolKey::ShowRemainingDueCountsInStudy
             | BoolKey::CardCountsSeparateInactive
+            | BoolKey::RestorePositionBrowser
+            | BoolKey::RestorePositionReviewer
             | BoolKey::NormalizeNoteText => self.get_config_optional(key).unwrap_or(true),
 
             // other options default to false

@@ -14,6 +14,7 @@ pub(crate) mod review;
 pub(crate) mod steps;
 
 pub use filtered::FilteredState;
+use fsrs::NextStates;
 pub(crate) use interval_kind::IntervalKind;
 pub use learning::LearnState;
 pub use new::NewState;
@@ -25,6 +26,7 @@ pub use review::ReviewState;
 
 use self::steps::LearningSteps;
 use crate::revlog::RevlogReviewKind;
+use crate::scheduler::answering::PreviewDelays;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CardState {
@@ -47,7 +49,7 @@ impl CardState {
         }
     }
 
-    pub(crate) fn next_states(self, ctx: &StateContext) -> NextCardStates {
+    pub(crate) fn next_states(self, ctx: &StateContext) -> SchedulingStates {
         match self {
             CardState::Normal(state) => state.next_states(ctx),
             CardState::Filtered(state) => state.next_states(ctx),
@@ -65,12 +67,25 @@ impl CardState {
     pub(crate) fn leeched(self) -> bool {
         self.review_state().map(|r| r.leeched).unwrap_or_default()
     }
+
+    /// Returns the position if it's a [NewState].
+    pub(super) fn new_position(&self) -> Option<u32> {
+        match self {
+            Self::Normal(NormalState::New(NewState { position }))
+            | Self::Filtered(FilteredState::Rescheduling(ReschedulingFilterState {
+                original_state: NormalState::New(NewState { position }),
+            })) => Some(*position),
+            _ => None,
+        }
+    }
 }
 
 /// Info required during state transitions.
 pub(crate) struct StateContext<'a> {
-    /// In range `0.0..1.0`. Used to pick the final interval from the fuzz range.
+    /// In range `0.0..1.0`. Used to pick the final interval from the fuzz
+    /// range.
     pub fuzz_factor: Option<f32>,
+    pub fsrs_next_states: Option<NextStates>,
 
     // learning
     pub steps: LearningSteps<'a>,
@@ -92,7 +107,7 @@ pub(crate) struct StateContext<'a> {
 
     // filtered
     pub in_filtered_deck: bool,
-    pub preview_step: u32,
+    pub preview_delays: PreviewDelays,
 }
 
 impl<'a> StateContext<'a> {
@@ -101,7 +116,7 @@ impl<'a> StateContext<'a> {
     /// - `minimum` is as passed, but at least 1, and at most `maximum`.
     pub(crate) fn min_and_max_review_intervals(&self, minimum: u32) -> (u32, u32) {
         let maximum = self.maximum_review_interval.max(1);
-        let minimum = minimum.max(1).min(maximum);
+        let minimum = minimum.clamp(1, maximum);
         (minimum, maximum)
     }
 
@@ -122,13 +137,18 @@ impl<'a> StateContext<'a> {
             lapse_multiplier: 0.0,
             minimum_lapse_interval: 1,
             in_filtered_deck: false,
-            preview_step: 10,
+            preview_delays: PreviewDelays {
+                again: 1,
+                hard: 10,
+                good: 0,
+            },
+            fsrs_next_states: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct NextCardStates {
+pub struct SchedulingStates {
     pub current: CardState,
     pub again: CardState,
     pub hard: CardState,

@@ -3,27 +3,26 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import type { GraphsResponse } from "@tslib/anki/stats_pb";
+    import * as tr2 from "@tslib/ftl";
+    import { createEventDispatcher } from "svelte";
+
+    import type { GraphData, TableDatum } from "./card-counts";
+    import { gatherData, renderCards } from "./card-counts";
     import Graph from "./Graph.svelte";
+    import type { GraphPrefs } from "./graph-helpers";
+    import type { SearchEventMap } from "./graph-helpers";
+    import { defaultGraphBounds } from "./graph-helpers";
     import InputBox from "./InputBox.svelte";
 
-    import { createEventDispatcher } from "svelte";
-    import type { Stats } from "../lib/proto";
-    import type { PreferenceStore } from "../sveltelib/preferences";
-    import * as tr2 from "../lib/ftl";
-    import { defaultGraphBounds } from "./graph-helpers";
-    import type { SearchEventMap } from "./graph-helpers";
-    import { gatherData, renderCards } from "./card-counts";
-    import type { GraphData, TableDatum } from "./card-counts";
+    export let sourceData: GraphsResponse;
+    export let prefs: GraphPrefs;
 
-    export let sourceData: Stats.GraphsResponse;
-    export let preferences: PreferenceStore<Stats.GraphPreferences>;
-
-    let { cardCountsSeparateInactive, browserLinksSupported } = preferences;
     const dispatch = createEventDispatcher<SearchEventMap>();
 
     let svg = null as HTMLElement | SVGElement | null;
 
-    let bounds = defaultGraphBounds();
+    const bounds = defaultGraphBounds();
     bounds.width = 225;
     bounds.marginBottom = 0;
 
@@ -31,7 +30,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let tableData = null as unknown as TableDatum[];
 
     $: {
-        graphData = gatherData(sourceData, $cardCountsSeparateInactive);
+        graphData = gatherData(sourceData, $prefs.cardCountsSeparateInactive);
         tableData = renderCards(svg as any, bounds, graphData);
     }
 
@@ -42,13 +41,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <Graph title={graphData.title}>
     <InputBox>
         <label>
-            <input type="checkbox" bind:checked={$cardCountsSeparateInactive} />
+            <input type="checkbox" bind:checked={$prefs.cardCountsSeparateInactive} />
             {label}
         </label>
     </InputBox>
 
     <div class="counts-outer">
-        <div class="svg-container" width={bounds.width} height={bounds.height}>
+        <div class="svg-container">
             <svg
                 bind:this={svg}
                 viewBox={`0 0 ${bounds.width} ${bounds.height}`}
@@ -64,8 +63,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                         <!-- prettier-ignore -->
                         <td>
                             <span style="color: {d.colour};">■&nbsp;</span>
-                            {#if browserLinksSupported}
-                                <span class="search-link" on:click={() => dispatch('search', { query: d.query })}>{d.label}</span>
+                            {#if $prefs.browserLinksSupported}
+                                <button class="search-link" on:click={() => dispatch('search', { query: d.query })}>{d.label}</button>
                             {:else}
                                 <span>{d.label}</span>
                             {/if}
@@ -76,7 +75,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 {/each}
 
                 <tr>
-                    <td><span style="visibility: hidden;">■</span> {total}</td>
+                    <td>
+                        <span style="visibility: hidden;">■</span>
+                        {total}
+                    </td>
                     <td class="right">{graphData.totalCards}</td>
                     <td />
                 </tr>
@@ -87,13 +89,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <style lang="scss">
     svg {
-        transition: opacity 1s;
+        transition: opacity var(--transition-slow);
     }
 
     .counts-outer {
         display: flex;
         justify-content: center;
         margin: 0 4vw;
+        flex-wrap: wrap;
+        flex: 1;
 
         .svg-container {
             width: 225px;
@@ -120,30 +124,17 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
     }
 
-    /* On narrow devices, stack graph and table in a column */
-    @media only screen and (max-width: 600px) {
-        .counts-outer {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-
-            .svg-container {
-                width: 180px;
-
-                svg {
-                    margin-left: 4vw;
-                }
-            }
-
-            .counts-table table td {
-                padding: 0 min(6vw, 30px);
-            }
-        }
+    .search-link {
+        border: none;
+        background: transparent;
+        cursor: pointer;
+        box-shadow: none;
+        padding: 1px 3px;
+        margin-bottom: 0px;
     }
 
     .search-link:hover {
-        cursor: pointer;
-        color: var(--link);
+        color: var(--fg-link);
         text-decoration: underline;
     }
 </style>

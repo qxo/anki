@@ -1,21 +1,28 @@
 /* Copyright: Ankitects Pty Ltd and contributors
  * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
 
+@use "sass/vars";
+@use "ts/image-occlusion/review";
+
 hr {
-    background-color: #ccc;
+    background-color: vars.palette(darkgray, 0);
 }
 
 body {
     margin: 20px;
     overflow-wrap: break-word;
-    background-color: var(--window-bg);
+    // default background setting to fit with toolbar
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-position: top;
+    background-attachment: fixed;
 }
 
 // explicit nightMode definition required
 // to override default .card styling
 body.nightMode {
-    background-color: var(--window-bg);
-    color: var(--text-fg);
+    background-color: var(--canvas);
+    color: var(--fg);
 }
 
 img {
@@ -23,9 +30,22 @@ img {
     max-height: 95vh;
 }
 
+li {
+    text-align: start;
+}
+
+pre {
+    text-align: left;
+}
+
 #_flag {
     position: fixed;
-    right: 10px;
+    [dir="ltr"] & {
+        right: 10px;
+    }
+    [dir="rtl"] & {
+        left: 10px;
+    }
     top: 0;
     font-size: 30px;
     -webkit-text-stroke-width: 1px;
@@ -34,7 +54,12 @@ img {
 
 #_mark {
     position: fixed;
-    left: 10px;
+    [dir="ltr"] & {
+        left: 10px;
+    }
+    [dir="rtl"] & {
+        right: 10px;
+    }
     top: 0;
     font-size: 30px;
     color: yellow;
@@ -48,9 +73,8 @@ img {
     box-sizing: border-box;
 }
 
-.night-mode #typeans {
-    background-color: var(--frame-bg);
-    color: var(--text-fg);
+code#typeans {
+    white-space: pre-wrap;
 }
 
 .typeGood {
@@ -66,6 +90,10 @@ img {
 .typeMissed {
     color: black;
     background: #ccc;
+}
+
+button {
+    margin: 1em 0.5em;
 }
 
 .replay-button {

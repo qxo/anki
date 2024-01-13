@@ -4,7 +4,8 @@
 //! Adding and updating.
 
 use super::name::immediate_parent_name;
-use crate::{error::FilteredDeckError, prelude::*};
+use crate::error::FilteredDeckError;
+use crate::prelude::*;
 
 impl Collection {
     /// Add a new deck. The id must be 0, as it will be automatically assigned.
@@ -14,7 +15,7 @@ impl Collection {
 
     pub fn update_deck(&mut self, deck: &mut Deck) -> Result<OpOutput<()>> {
         self.transact(Op::UpdateDeck, |col| {
-            let existing_deck = col.storage.get_deck(deck.id)?.ok_or(AnkiError::NotFound)?;
+            let existing_deck = col.storage.get_deck(deck.id)?.or_not_found(deck.id)?;
             col.update_deck_inner(deck, existing_deck, col.usn()?)
         })
     }
@@ -43,9 +44,7 @@ impl Collection {
     }
 
     pub(crate) fn add_deck_inner(&mut self, deck: &mut Deck, usn: Usn) -> Result<()> {
-        if deck.id.0 != 0 {
-            return Err(AnkiError::invalid_input("deck to add must have id 0"));
-        }
+        require!(deck.id.0 == 0, "deck to add must have id 0");
         self.prepare_deck_for_update(deck, usn)?;
         deck.set_modified(usn);
         self.match_or_create_parents(deck, usn)?;
@@ -72,8 +71,8 @@ impl Collection {
         }
         self.update_single_deck_undoable(deck, original)?;
         if name_changed {
-            // after updating, we need to ensure all grandparents exist, which may not be the case
-            // in the parent->child case
+            // after updating, we need to ensure all grandparents exist, which may not be
+            // the case in the parent->child case
             self.create_missing_parents(&deck.name, usn)?;
         }
         Ok(())
@@ -110,7 +109,8 @@ impl Collection {
 
     /// If parent deck(s) exist, rewrite name to match their case.
     /// If they don't exist, create them.
-    /// Returns an error if a DB operation fails, or if the first existing parent is a filtered deck.
+    /// Returns an error if a DB operation fails, or if the first existing
+    /// parent is a filtered deck.
     fn match_or_create_parents(&mut self, deck: &mut Deck, usn: Usn) -> Result<()> {
         let child_split: Vec<_> = deck.name.components().collect();
         if let Some(parent_deck) = self.first_existing_parent(deck.name.as_native_str(), 0)? {
@@ -148,14 +148,12 @@ impl Collection {
         Ok(())
     }
 
-    fn first_existing_parent(
+    pub(crate) fn first_existing_parent(
         &self,
         machine_name: &str,
         recursion_level: usize,
     ) -> Result<Option<Deck>> {
-        if recursion_level > 10 {
-            return Err(AnkiError::invalid_input("deck nesting level too deep"));
-        }
+        require!(recursion_level < 11, "deck nesting level too deep");
         if let Some(parent_name) = immediate_parent_name(machine_name) {
             if let Some(parent_did) = self.storage.get_deck_id(parent_name)? {
                 self.storage.get_deck(parent_did)

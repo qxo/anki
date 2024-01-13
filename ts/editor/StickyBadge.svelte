@@ -3,19 +3,21 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import Badge from "../components/Badge.svelte";
+    import { bridgeCommand } from "@tslib/bridgecommand";
+    import * as tr from "@tslib/ftl";
+    import { getPlatformString, registerShortcut } from "@tslib/shortcuts";
     import { onMount } from "svelte";
-    import { stickyOn, stickyOff } from "./icons";
-    import { getEditorField } from "./EditorField.svelte";
-    import * as tr from "../lib/ftl";
-    import { bridgeCommand } from "../lib/bridgecommand";
-    import { registerShortcut, getPlatformString } from "../lib/shortcuts";
+
+    import Badge from "../components/Badge.svelte";
+    import { context as editorFieldContext } from "./EditorField.svelte";
+    import { stickyIcon } from "./icons";
+
+    const animated = !document.body.classList.contains("reduce-motion");
 
     export let active: boolean;
+    export let show: boolean;
 
-    $: icon = active ? stickyOn : stickyOff;
-
-    const editorField = getEditorField();
+    const editorField = editorFieldContext.get();
     const keyCombination = "F9";
 
     export let index: number;
@@ -26,30 +28,41 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         });
     }
 
-    function shortcut(element: HTMLElement): void {
-        registerShortcut(toggle, keyCombination, element);
+    function shortcut(target: HTMLElement): () => void {
+        return registerShortcut(toggle, keyCombination, { target });
     }
 
-    onMount(() => editorField.element.then(shortcut));
+    onMount(() => {
+        editorField.element.then(shortcut);
+    });
 </script>
 
-<span class:highlighted={active} on:click|stopPropagation={toggle}>
+<span
+    class:highlighted={active}
+    class:visible={show || !animated}
+    on:click|stopPropagation={toggle}
+>
     <Badge
         tooltip="{tr.editingToggleSticky()} ({getPlatformString(keyCombination)})"
         widthMultiplier={0.7}
-        --icon-align="text-top">{@html icon}</Badge
     >
+        {@html stickyIcon}
+    </Badge>
 </span>
 
 <style lang="scss">
     span {
-        opacity: 0.4;
-
+        cursor: pointer;
+        opacity: 0;
+        &.visible {
+            transition: none;
+            opacity: 0.4;
+            &:hover {
+                opacity: 0.8;
+            }
+        }
         &.highlighted {
             opacity: 1;
-        }
-        &:hover {
-            opacity: 0.8;
         }
     }
 </style>

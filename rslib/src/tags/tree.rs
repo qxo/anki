@@ -1,12 +1,15 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{collections::HashSet, iter::Peekable};
+use std::collections::HashSet;
+use std::iter::Peekable;
 
+use anki_proto::tags::TagTreeNode;
 use unicase::UniCase;
 
-use super::{immediate_parent_name_unicase, Tag};
-use crate::{backend_proto::TagTreeNode, prelude::*};
+use super::immediate_parent_name_unicase;
+use super::Tag;
+use crate::prelude::*;
 
 impl Collection {
     pub fn tag_tree(&mut self) -> Result<TagTreeNode> {
@@ -121,7 +124,6 @@ fn add_tag_and_missing_parents<'a, 'b>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::collection::open_test_collection;
 
     fn node(name: &str, level: u32, children: Vec<TagTreeNode>) -> TagTreeNode {
         TagTreeNode {
@@ -138,7 +140,7 @@ mod test {
 
     #[test]
     fn tree() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         note.tags.push("foo::bar::a".into());
